@@ -1,0 +1,877 @@
+import { ipcMain } from 'electron';
+import type { Database } from 'better-sqlite3';
+import { getDb } from './db';
+import {
+  getSession,
+  hashPassword,
+  login,
+  logAudit,
+  requireAdmin,
+  requireSession,
+  setSession,
+  verifyPassword,
+} from './auth';
+import { printBill, printPreorderReceipt, printTestSlip, type SlipShop } from './printer';
+
+type MealType = 'lunch' | 'dinner';
+type PaymentMode = 'cash' | 'upi' | 'card' | 'other';
+
+function shopFromSettings(db: Database): SlipShop {
+  const get = (k: string, fb = '') =>
+    (db.prepare(`SELECT value FROM settings WHERE key=?`).get(k) as { value?: string } | undefined)?.value || fb;
+  return {
+    name: get('restaurant_name', 'Restaurant'),
+    address: get('restaurant_address'),
+    phone: get('restaurant_phone'),
+    gst: get('gst_no'),
+  };
+}
+
+function defaultMealForNow(db: Database): MealType {
+  const lunchUntil = parseInt(
+    ((db.prepare(`SELECT value FROM settings WHERE key='lunch_until_hour'`).get() as
+      | { value?: string }
+      | undefined)?.value) || '16',
+    10
+  );
+  const hour = new Date().getHours();
+  return hour < lunchUntil ? 'lunch' : 'dinner';
+}
+
+function nextTokenForToday(db: Database): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(MAX(token_no), 0) AS m
+       FROM bills
+       WHERE date(created_at_local) = date('now', 'localtime')`
+    )
+    .get() as { m: number } | undefined;
+  // bills doesn't have created_at_local — fall back to opened_at via localtime
+  const row2 = db
+    .prepare(
+      `SELECT COALESCE(MAX(token_no), 0) AS m
+       FROM bills
+       WHERE date(opened_at, 'localtime') = date('now', 'localtime')
+         AND token_no IS NOT NULL`
+    )
+    .get() as { m: number };
+  return (row2?.m ?? row?.m ?? 0) + 1;
+}
+
+function nextOrderNo(db: Database): number {
+  const r = db
+    .prepare(`SELECT COALESCE(MAX(order_no), 0) AS m FROM preorders`)
+    .get() as { m: number };
+  return r.m + 1;
+}
+
+function recomputeBillTotals(db: Database, billId: number) {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(total), 0) AS subtotal,
+              COALESCE(SUM(qty * plate_weight), 0) AS plates
+       FROM bill_items WHERE bill_id = ?`
+    )
+    .get(billId) as { subtotal: number; plates: number };
+  const cur = db.prepare(`SELECT discount FROM bills WHERE id=?`).get(billId) as
+    | { discount: number }
+    | undefined;
+  const discount = cur?.discount ?? 0;
+  const total = Math.max(0, row.subtotal - discount);
+  db.prepare(
+    `UPDATE bills SET subtotal = ?, plates = ?, total = ?, sync_status='pending' WHERE id = ?`
+  ).run(row.subtotal, row.plates, total, billId);
+  return { subtotal: row.subtotal, plates: row.plates, total };
+}
+
+function recomputePreorderTotals(db: Database, preorderId: number) {
+  const items = db
+    .prepare(`SELECT COALESCE(SUM(total), 0) AS t FROM preorder_items WHERE preorder_id=?`)
+    .get(preorderId) as { t: number };
+  const pays = db
+    .prepare(`SELECT COALESCE(SUM(amount), 0) AS a FROM preorder_payments WHERE preorder_id=?`)
+    .get(preorderId) as { a: number };
+  const total = items.t;
+  const advance = pays.a;
+  const balance = Math.max(0, total - advance);
+  let status = 'pending';
+  if (advance >= total && total > 0) status = 'paid';
+  else if (advance > 0) status = 'partial';
+  db.prepare(
+    `UPDATE preorders SET total=?, advance_paid=?, balance_due=?,
+            status = CASE WHEN status IN ('fulfilled','cancelled') THEN status ELSE ? END,
+            sync_status='pending'
+     WHERE id=?`
+  ).run(total, advance, balance, status, preorderId);
+  return { total, advance, balance };
+}
+
+function getBillForSlip(db: Database, billId: number) {
+  const bill = db
+    .prepare(
+      `SELECT b.*, t.label AS table_label
+       FROM bills b LEFT JOIN tables t ON t.id = b.table_id
+       WHERE b.id = ?`
+    )
+    .get(billId) as any;
+  if (!bill) throw new Error('Bill not found');
+  const items = db
+    .prepare(
+      `SELECT name, qty, unit_price, total FROM bill_items WHERE bill_id=? ORDER BY sort_order, id`
+    )
+    .all(billId) as Array<{ name: string; qty: number; unit_price: number; total: number }>;
+  const payments = db
+    .prepare(
+      `SELECT amount, mode, cash_received, change_given FROM bill_payments WHERE bill_id=? ORDER BY id`
+    )
+    .all(billId) as Array<{ amount: number; mode: string; cash_received?: number; change_given?: number }>;
+  return { ...bill, items, payments };
+}
+
+export function registerIpc() {
+  const db = getDb();
+
+  // -------- AUTH --------
+  ipcMain.handle('auth:login', (_e, { username, password }) => {
+    const s = login(db, username, password);
+    if (!s) return { ok: false, error: 'Invalid credentials' };
+    logAudit(db, 'auth.login', { details: { username: s.username } });
+    return { ok: true, session: s };
+  });
+
+  ipcMain.handle('auth:logout', () => {
+    const s = getSession();
+    if (s) logAudit(db, 'auth.logout', { details: { username: s.username } });
+    setSession(null);
+    return { ok: true };
+  });
+
+  ipcMain.handle('auth:me', () => ({ session: getSession() }));
+
+  ipcMain.handle('auth:changePassword', (_e, { oldPassword, newPassword }) => {
+    const s = requireSession();
+    const row = db
+      .prepare(`SELECT password_hash FROM users WHERE id=?`)
+      .get(s.userId) as { password_hash: string } | undefined;
+    if (!row) return { ok: false, error: 'User missing' };
+    if (!verifyPassword(oldPassword, row.password_hash))
+      return { ok: false, error: 'Old password wrong' };
+    db.prepare(`UPDATE users SET password_hash=? WHERE id=?`).run(
+      hashPassword(newPassword),
+      s.userId
+    );
+    logAudit(db, 'auth.changePassword', { entity_type: 'user', entity_id: s.userId });
+    return { ok: true };
+  });
+
+  ipcMain.handle('auth:listUsers', () => {
+    requireAdmin();
+    const rows = db
+      .prepare(`SELECT id, username, role, active, created_at FROM users ORDER BY id`)
+      .all();
+    return { ok: true, users: rows };
+  });
+
+  ipcMain.handle('auth:createUser', (_e, { username, password, role }) => {
+    requireAdmin();
+    if (!username || !password) return { ok: false, error: 'Missing fields' };
+    if (role !== 'admin' && role !== 'manager') return { ok: false, error: 'Bad role' };
+    try {
+      const r = db
+        .prepare(
+          `INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)`
+        )
+        .run(username, hashPassword(password), role);
+      logAudit(db, 'auth.createUser', {
+        entity_type: 'user',
+        entity_id: Number(r.lastInsertRowid),
+        details: { username, role },
+      });
+      return { ok: true, id: Number(r.lastInsertRowid) };
+    } catch (e: any) {
+      return { ok: false, error: e.message || 'Create failed' };
+    }
+  });
+
+  ipcMain.handle('auth:setActive', (_e, { userId, active }) => {
+    requireAdmin();
+    db.prepare(`UPDATE users SET active=? WHERE id=?`).run(active ? 1 : 0, userId);
+    logAudit(db, 'auth.setActive', { entity_type: 'user', entity_id: userId, details: { active } });
+    return { ok: true };
+  });
+
+  // -------- SETTINGS --------
+  ipcMain.handle('settings:getAll', () => {
+    const rows = db.prepare(`SELECT key, value FROM settings`).all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    const out: Record<string, string> = {};
+    for (const r of rows) out[r.key] = r.value;
+    return { ok: true, settings: out };
+  });
+
+  ipcMain.handle('settings:set', (_e, entries: Record<string, string>) => {
+    requireSession();
+    const stmt = db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+    );
+    const tx = db.transaction(() => {
+      for (const [k, v] of Object.entries(entries)) stmt.run(k, v);
+    });
+    tx();
+    logAudit(db, 'settings.set', { details: { keys: Object.keys(entries) } });
+    return { ok: true };
+  });
+
+  // -------- MENU --------
+  ipcMain.handle('menu:list', () => {
+    const rows = db
+      .prepare(
+        `SELECT id, name, category, lunch_price, dinner_price, plate_weight,
+                shortcut_key, in_stock, active, sort_order
+         FROM menu_items
+         WHERE active = 1
+         ORDER BY sort_order, name`
+      )
+      .all();
+    return { ok: true, items: rows };
+  });
+
+  ipcMain.handle('menu:upsert', (_e, item) => {
+    requireSession();
+    if (item.id) {
+      db.prepare(
+        `UPDATE menu_items SET name=?, category=?, lunch_price=?, dinner_price=?,
+                plate_weight=?, shortcut_key=?, in_stock=?, active=?, sort_order=?,
+                updated_at=datetime('now')
+         WHERE id=?`
+      ).run(
+        item.name,
+        item.category ?? null,
+        item.lunch_price,
+        item.dinner_price,
+        item.plate_weight,
+        item.shortcut_key ?? null,
+        item.in_stock ? 1 : 0,
+        item.active ? 1 : 0,
+        item.sort_order,
+        item.id
+      );
+      logAudit(db, 'menu.update', { entity_type: 'menu_item', entity_id: item.id, details: item });
+      return { ok: true, id: item.id };
+    } else {
+      const r = db
+        .prepare(
+          `INSERT INTO menu_items
+            (name, category, lunch_price, dinner_price, plate_weight,
+             shortcut_key, in_stock, active, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          item.name,
+          item.category ?? null,
+          item.lunch_price,
+          item.dinner_price,
+          item.plate_weight,
+          item.shortcut_key ?? null,
+          item.in_stock ? 1 : 0,
+          item.active ? 1 : 0,
+          item.sort_order
+        );
+      const id = Number(r.lastInsertRowid);
+      logAudit(db, 'menu.create', { entity_type: 'menu_item', entity_id: id, details: item });
+      return { ok: true, id };
+    }
+  });
+
+  ipcMain.handle('menu:setStock', (_e, { id, in_stock }) => {
+    requireSession();
+    db.prepare(`UPDATE menu_items SET in_stock=?, updated_at=datetime('now') WHERE id=?`).run(
+      in_stock ? 1 : 0,
+      id
+    );
+    logAudit(db, 'menu.setStock', { entity_type: 'menu_item', entity_id: id, details: { in_stock } });
+    return { ok: true };
+  });
+
+  ipcMain.handle('menu:delete', (_e, id: number) => {
+    requireAdmin();
+    db.prepare(`UPDATE menu_items SET active=0 WHERE id=?`).run(id);
+    logAudit(db, 'menu.delete', { entity_type: 'menu_item', entity_id: id });
+    return { ok: true };
+  });
+
+  // -------- TABLES --------
+  ipcMain.handle('tables:list', () => {
+    const tables = db
+      .prepare(
+        `SELECT id, label, row_no, sort_order FROM tables WHERE active=1 ORDER BY row_no, sort_order`
+      )
+      .all() as Array<{ id: number; label: string; row_no: number; sort_order: number }>;
+    const openBills = db
+      .prepare(
+        `SELECT id, table_id, token_no, total, opened_at, meal_type
+         FROM bills WHERE status='open' AND table_id IS NOT NULL`
+      )
+      .all() as Array<{
+      id: number;
+      table_id: number;
+      token_no: number | null;
+      total: number;
+      opened_at: string;
+      meal_type: string;
+    }>;
+    const byTable = new Map<number, typeof openBills>();
+    for (const b of openBills) {
+      const arr = byTable.get(b.table_id) ?? [];
+      arr.push(b);
+      byTable.set(b.table_id, arr);
+    }
+    return {
+      ok: true,
+      tables: tables.map((t) => ({ ...t, openBills: byTable.get(t.id) ?? [] })),
+    };
+  });
+
+  ipcMain.handle('tables:newBill', (_e, { tableId, mealType }) => {
+    requireSession();
+    const meal: MealType = mealType ?? defaultMealForNow(db);
+    const r = db
+      .prepare(
+        `INSERT INTO bills (type, status, table_id, meal_type, created_by_user_id)
+         VALUES ('dine_in', 'open', ?, ?, ?)`
+      )
+      .run(tableId, meal, getSession()?.userId ?? null);
+    const billId = Number(r.lastInsertRowid);
+    logAudit(db, 'bills.openTable', { entity_type: 'bill', entity_id: billId, details: { tableId, meal } });
+    return { ok: true, bill: getBillForSlip(db, billId) };
+  });
+
+  ipcMain.handle('tables:loadBill', (_e, billId: number) => {
+    requireSession();
+    return { ok: true, bill: getBillForSlip(db, billId) };
+  });
+
+  ipcMain.handle('tables:saveOpen', (_e, { billId, items, customer }) => {
+    requireSession();
+    const tx = db.transaction(() => {
+      db.prepare(`DELETE FROM bill_items WHERE bill_id=?`).run(billId);
+      const insert = db.prepare(
+        `INSERT INTO bill_items
+          (bill_id, menu_item_id, name, qty, unit_price, plate_weight, total, is_custom, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      items.forEach((it: any, idx: number) => {
+        const total = +(it.qty * it.unit_price).toFixed(2);
+        insert.run(
+          billId,
+          it.menu_item_id ?? null,
+          it.name,
+          it.qty,
+          it.unit_price,
+          it.plate_weight ?? 1,
+          total,
+          it.is_custom ? 1 : 0,
+          idx
+        );
+      });
+      if (customer) {
+        db.prepare(
+          `UPDATE bills SET customer_name=?, customer_mobile=?, notes=? WHERE id=?`
+        ).run(
+          customer.name ?? null,
+          customer.mobile ?? null,
+          customer.notes ?? null,
+          billId
+        );
+      }
+      recomputeBillTotals(db, billId);
+    });
+    tx();
+    logAudit(db, 'bills.saveOpen', {
+      entity_type: 'bill',
+      entity_id: billId,
+      details: { itemCount: items.length },
+    });
+    return { ok: true, bill: getBillForSlip(db, billId) };
+  });
+
+  ipcMain.handle('tables:closeAndPrint', async (_e, { billId, payments }) => {
+    requireSession();
+    if (!Array.isArray(payments) || payments.length === 0)
+      return { ok: false, error: 'No payments provided' };
+
+    const totalsRow = db.prepare(`SELECT total FROM bills WHERE id=?`).get(billId) as
+      | { total: number }
+      | undefined;
+    if (!totalsRow) return { ok: false, error: 'Bill missing' };
+    const paySum = payments.reduce((s: number, p: any) => s + (p.amount || 0), 0);
+    if (Math.abs(paySum - totalsRow.total) > 0.01)
+      return { ok: false, error: `Payments ${paySum} ≠ total ${totalsRow.total}` };
+
+    const tx = db.transaction(() => {
+      // assign token at close time, so cancelled-before-close bills don't burn numbers
+      const token = nextTokenForToday(db);
+      const insertPay = db.prepare(
+        `INSERT INTO bill_payments (bill_id, amount, mode, cash_received, change_given)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+      for (const p of payments) {
+        insertPay.run(
+          billId,
+          p.amount,
+          p.mode,
+          p.cash_received ?? null,
+          p.change_given ?? null
+        );
+      }
+      db.prepare(
+        `UPDATE bills SET status='closed', closed_at=datetime('now'),
+                closed_by_user_id=?, token_no=?, sync_status='pending'
+         WHERE id=?`
+      ).run(getSession()?.userId ?? null, token, billId);
+    });
+    tx();
+
+    const slip = getBillForSlip(db, billId);
+    const printerName =
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '';
+    const copies = parseInt(
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_copies'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '1',
+      10
+    );
+
+    let printError: string | null = null;
+    try {
+      await printBill(shopFromSettings(db), slip, printerName, copies);
+    } catch (e: any) {
+      printError = e?.message ?? String(e);
+    }
+
+    logAudit(db, 'bills.close', {
+      entity_type: 'bill',
+      entity_id: billId,
+      details: { token: slip.token_no, total: slip.total, paymentModes: payments.map((p: any) => p.mode), printError },
+    });
+    return { ok: true, bill: slip, printError };
+  });
+
+  ipcMain.handle('tables:cancel', (_e, { billId, reason }) => {
+    requireSession();
+    const r = db
+      .prepare(
+        `UPDATE bills SET status='cancelled', cancelled_at=datetime('now'),
+                cancel_reason=?, sync_status='pending'
+         WHERE id=? AND status='open'`
+      )
+      .run(reason || null, billId);
+    if (r.changes === 0) return { ok: false, error: 'Bill not open' };
+    logAudit(db, 'bills.cancel', {
+      entity_type: 'bill',
+      entity_id: billId,
+      details: { reason },
+    });
+    return { ok: true };
+  });
+
+  // -------- BILLS / QUICK BILL / LISTS --------
+  ipcMain.handle('bills:quickBill', async (_e, payload) => {
+    requireSession();
+    const meal: MealType = payload.meal_type ?? defaultMealForNow(db);
+    const session = requireSession();
+
+    let billId = 0;
+    let printerErr: string | null = null;
+    const tx = db.transaction(() => {
+      const r = db
+        .prepare(
+          `INSERT INTO bills (type, status, meal_type, customer_name, customer_mobile, notes, created_by_user_id, opened_at)
+           VALUES (?, 'open', ?, ?, ?, ?, ?, datetime('now'))`
+        )
+        .run(
+          payload.type,
+          meal,
+          payload.customer?.name ?? null,
+          payload.customer?.mobile ?? null,
+          payload.customer?.notes ?? null,
+          session.userId
+        );
+      billId = Number(r.lastInsertRowid);
+      const insert = db.prepare(
+        `INSERT INTO bill_items
+          (bill_id, menu_item_id, name, qty, unit_price, plate_weight, total, is_custom, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      payload.items.forEach((it: any, idx: number) => {
+        const total = +(it.qty * it.unit_price).toFixed(2);
+        insert.run(
+          billId,
+          it.menu_item_id ?? null,
+          it.name,
+          it.qty,
+          it.unit_price,
+          it.plate_weight ?? 1,
+          total,
+          it.is_custom ? 1 : 0,
+          idx
+        );
+      });
+      recomputeBillTotals(db, billId);
+
+      const totalsRow = db.prepare(`SELECT total FROM bills WHERE id=?`).get(billId) as { total: number };
+      const paySum = (payload.payments || []).reduce((s: number, p: any) => s + (p.amount || 0), 0);
+      if (Math.abs(paySum - totalsRow.total) > 0.01) throw new Error(`Payments ${paySum} ≠ total ${totalsRow.total}`);
+
+      const insertPay = db.prepare(
+        `INSERT INTO bill_payments (bill_id, amount, mode, cash_received, change_given) VALUES (?, ?, ?, ?, ?)`
+      );
+      for (const p of payload.payments) {
+        insertPay.run(billId, p.amount, p.mode, p.cash_received ?? null, p.change_given ?? null);
+      }
+      const token = nextTokenForToday(db);
+      db.prepare(
+        `UPDATE bills SET status='closed', closed_at=datetime('now'),
+                closed_by_user_id=?, token_no=?, sync_status='pending' WHERE id=?`
+      ).run(session.userId, token, billId);
+    });
+
+    try {
+      tx();
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
+
+    const slip = getBillForSlip(db, billId);
+    if (payload.print) {
+      const printerName =
+        ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+          | { value?: string }
+          | undefined)?.value) || '';
+      const copies = parseInt(
+        ((db.prepare(`SELECT value FROM settings WHERE key='printer_copies'`).get() as
+          | { value?: string }
+          | undefined)?.value) || '1',
+        10
+      );
+      try {
+        await printBill(shopFromSettings(db), slip, printerName, copies);
+      } catch (e: any) {
+        printerErr = e?.message ?? String(e);
+      }
+    }
+    logAudit(db, 'bills.quick', {
+      entity_type: 'bill',
+      entity_id: billId,
+      details: { type: payload.type, total: slip.total, printError: printerErr },
+    });
+    return { ok: true, bill: slip, printError: printerErr };
+  });
+
+  ipcMain.handle('bills:list', (_e, params) => {
+    requireSession();
+    const where: string[] = [];
+    const args: any[] = [];
+    if (params?.from) {
+      where.push(`date(opened_at, 'localtime') >= date(?)`);
+      args.push(params.from);
+    }
+    if (params?.to) {
+      where.push(`date(opened_at, 'localtime') <= date(?)`);
+      args.push(params.to);
+    }
+    if (params?.status) {
+      where.push(`status = ?`);
+      args.push(params.status);
+    }
+    if (params?.q) {
+      where.push(`(token_no = ? OR customer_name LIKE ? OR customer_mobile LIKE ?)`);
+      const q = params.q;
+      const num = parseInt(q, 10);
+      args.push(Number.isFinite(num) ? num : -1, `%${q}%`, `%${q}%`);
+    }
+    const sql = `SELECT b.id, b.token_no, b.type, b.status, b.meal_type, b.total, b.plates,
+                        b.opened_at, b.closed_at, b.customer_name, b.customer_mobile,
+                        t.label AS table_label
+                 FROM bills b LEFT JOIN tables t ON t.id=b.table_id
+                 ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+                 ORDER BY b.id DESC LIMIT 500`;
+    const rows = db.prepare(sql).all(...args);
+    return { ok: true, bills: rows };
+  });
+
+  ipcMain.handle('bills:get', (_e, id: number) => {
+    requireSession();
+    return { ok: true, bill: getBillForSlip(db, id) };
+  });
+
+  ipcMain.handle('bills:reprint', async (_e, id: number) => {
+    requireSession();
+    const slip = getBillForSlip(db, id);
+    const printerName =
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '';
+    const copies = parseInt(
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_copies'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '1',
+      10
+    );
+    try {
+      await printBill(shopFromSettings(db), slip, printerName, copies);
+      logAudit(db, 'bills.reprint', { entity_type: 'bill', entity_id: id });
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  ipcMain.handle('bills:testPrint', async () => {
+    const printerName =
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '';
+    try {
+      await printTestSlip(printerName);
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  // -------- PRE-ORDERS --------
+  ipcMain.handle('preorders:list', (_e, params) => {
+    requireSession();
+    const where: string[] = [];
+    const args: any[] = [];
+    if (params?.from) { where.push(`for_date >= ?`); args.push(params.from); }
+    if (params?.to)   { where.push(`for_date <= ?`); args.push(params.to); }
+    if (params?.status) { where.push(`status = ?`); args.push(params.status); }
+    const rows = db
+      .prepare(
+        `SELECT id, order_no, customer_name, customer_mobile, for_date, for_time,
+                meal_type, total, advance_paid, balance_due, status, fulfilled_bill_id, created_at
+         FROM preorders ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+         ORDER BY for_date ASC, for_time ASC, id ASC`
+      )
+      .all(...args);
+    return { ok: true, preorders: rows };
+  });
+
+  ipcMain.handle('preorders:get', (_e, id: number) => {
+    requireSession();
+    const p = db.prepare(`SELECT * FROM preorders WHERE id=?`).get(id);
+    if (!p) return { ok: false, error: 'Not found' };
+    const items = db
+      .prepare(`SELECT * FROM preorder_items WHERE preorder_id=? ORDER BY sort_order, id`)
+      .all(id);
+    const payments = db
+      .prepare(`SELECT * FROM preorder_payments WHERE preorder_id=? ORDER BY id`)
+      .all(id);
+    return { ok: true, preorder: p, items, payments };
+  });
+
+  ipcMain.handle('preorders:create', (_e, payload) => {
+    const session = requireSession();
+    let id = 0;
+    const tx = db.transaction(() => {
+      const orderNo = nextOrderNo(db);
+      const r = db
+        .prepare(
+          `INSERT INTO preorders
+            (order_no, customer_name, customer_mobile, for_date, for_time, meal_type, notes,
+             created_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          orderNo,
+          payload.customer_name,
+          payload.customer_mobile ?? null,
+          payload.for_date,
+          payload.for_time ?? null,
+          payload.meal_type ?? null,
+          payload.notes ?? null,
+          session.userId
+        );
+      id = Number(r.lastInsertRowid);
+      const ins = db.prepare(
+        `INSERT INTO preorder_items
+            (preorder_id, menu_item_id, name, qty, unit_price, total, is_custom, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      payload.items.forEach((it: any, idx: number) => {
+        const total = +(it.qty * it.unit_price).toFixed(2);
+        ins.run(
+          id,
+          it.menu_item_id ?? null,
+          it.name,
+          it.qty,
+          it.unit_price,
+          total,
+          it.is_custom ? 1 : 0,
+          idx
+        );
+      });
+      if (payload.advance && payload.advance.amount > 0) {
+        db.prepare(
+          `INSERT INTO preorder_payments (preorder_id, amount, mode) VALUES (?, ?, ?)`
+        ).run(id, payload.advance.amount, payload.advance.mode);
+      }
+      recomputePreorderTotals(db, id);
+    });
+    tx();
+    logAudit(db, 'preorders.create', { entity_type: 'preorder', entity_id: id, details: payload });
+    return { ok: true, id };
+  });
+
+  ipcMain.handle('preorders:addPayment', (_e, { id, payment }) => {
+    requireSession();
+    db.prepare(
+      `INSERT INTO preorder_payments (preorder_id, amount, mode, notes) VALUES (?, ?, ?, ?)`
+    ).run(id, payment.amount, payment.mode, payment.notes ?? null);
+    recomputePreorderTotals(db, id);
+    logAudit(db, 'preorders.addPayment', {
+      entity_type: 'preorder',
+      entity_id: id,
+      details: payment,
+    });
+    return { ok: true };
+  });
+
+  ipcMain.handle('preorders:fulfill', (_e, { id, billId }) => {
+    requireSession();
+    db.prepare(
+      `UPDATE preorders SET status='fulfilled', fulfilled_at=datetime('now'),
+              fulfilled_bill_id=?, sync_status='pending' WHERE id=?`
+    ).run(billId ?? null, id);
+    logAudit(db, 'preorders.fulfill', {
+      entity_type: 'preorder',
+      entity_id: id,
+      details: { billId },
+    });
+    return { ok: true };
+  });
+
+  ipcMain.handle('preorders:cancel', (_e, { id, reason }) => {
+    requireAdmin();
+    db.prepare(
+      `UPDATE preorders SET status='cancelled', cancelled_at=datetime('now'),
+              cancel_reason=?, sync_status='pending' WHERE id=?`
+    ).run(reason || null, id);
+    logAudit(db, 'preorders.cancel', {
+      entity_type: 'preorder',
+      entity_id: id,
+      details: { reason },
+    });
+    return { ok: true };
+  });
+
+  ipcMain.handle('preorders:printReceipt', async (_e, id: number) => {
+    requireSession();
+    const p = db.prepare(`SELECT * FROM preorders WHERE id=?`).get(id) as any;
+    if (!p) return { ok: false, error: 'Not found' };
+    const items = db
+      .prepare(`SELECT name, qty, unit_price, total FROM preorder_items WHERE preorder_id=? ORDER BY sort_order, id`)
+      .all(id) as any[];
+    const printerName =
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '';
+    try {
+      await printPreorderReceipt(shopFromSettings(db), { ...p, items }, printerName);
+      logAudit(db, 'preorders.printReceipt', { entity_type: 'preorder', entity_id: id });
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  // -------- DAY SUMMARY --------
+  ipcMain.handle('day:summary', (_e, date?: string) => {
+    requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const totals = db
+      .prepare(
+        `SELECT COUNT(*) AS bills,
+                COALESCE(SUM(total), 0) AS revenue,
+                COALESCE(SUM(plates), 0) AS plates
+         FROM bills WHERE status='closed' AND date(opened_at,'localtime') = ?`
+      )
+      .get(d) as { bills: number; revenue: number; plates: number };
+    const byMode = db
+      .prepare(
+        `SELECT bp.mode, COALESCE(SUM(bp.amount), 0) AS amt
+         FROM bill_payments bp
+         JOIN bills b ON b.id = bp.bill_id
+         WHERE b.status='closed' AND date(b.opened_at,'localtime') = ?
+         GROUP BY bp.mode`
+      )
+      .all(d) as Array<{ mode: string; amt: number }>;
+    const byMeal = db
+      .prepare(
+        `SELECT meal_type, COUNT(*) AS bills, COALESCE(SUM(total),0) AS revenue
+         FROM bills WHERE status='closed' AND date(opened_at,'localtime') = ?
+         GROUP BY meal_type`
+      )
+      .all(d) as Array<{ meal_type: string; bills: number; revenue: number }>;
+    const items = db
+      .prepare(
+        `SELECT bi.name, SUM(bi.qty) AS qty, SUM(bi.total) AS revenue
+         FROM bill_items bi
+         JOIN bills b ON b.id = bi.bill_id
+         WHERE b.status='closed' AND date(b.opened_at,'localtime') = ?
+         GROUP BY bi.name ORDER BY qty DESC`
+      )
+      .all(d) as Array<{ name: string; qty: number; revenue: number }>;
+    return { ok: true, date: d, totals, byMode, byMeal, items };
+  });
+
+  // -------- AUDIT --------
+  ipcMain.handle('audit:list', (_e, params) => {
+    requireAdmin();
+    const where: string[] = [];
+    const args: any[] = [];
+    if (params?.from) { where.push(`date(at,'localtime') >= ?`); args.push(params.from); }
+    if (params?.to)   { where.push(`date(at,'localtime') <= ?`); args.push(params.to); }
+    if (params?.q)    { where.push(`(action LIKE ? OR actor_username LIKE ? OR details LIKE ?)`); args.push(`%${params.q}%`, `%${params.q}%`, `%${params.q}%`); }
+    const rows = db
+      .prepare(
+        `SELECT id, at, actor_username, action, entity_type, entity_id, details
+         FROM audit_log ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+         ORDER BY id DESC LIMIT 500`
+      )
+      .all(...args);
+    return { ok: true, entries: rows };
+  });
+
+  // -------- CLOUD (stubs — phase 2) --------
+  ipcMain.handle('cloud:status', () => {
+    const enabled =
+      (db.prepare(`SELECT value FROM settings WHERE key='cloud_sync_enabled'`).get() as
+        | { value?: string }
+        | undefined)?.value === '1';
+    const pending = db
+      .prepare(`SELECT COUNT(*) AS c FROM bills WHERE sync_status='pending'`)
+      .get() as { c: number };
+    const pendingPre = db
+      .prepare(`SELECT COUNT(*) AS c FROM preorders WHERE sync_status='pending'`)
+      .get() as { c: number };
+    return { ok: true, enabled, pending: pending.c + pendingPre.c };
+  });
+
+  ipcMain.handle('cloud:pushPending', () => {
+    requireAdmin();
+    return { ok: false, error: 'Cloud sync not yet enabled. Configure Supabase URL/key in Settings (phase 2).' };
+  });
+
+  ipcMain.handle('cloud:pullSnapshot', () => {
+    requireAdmin();
+    return { ok: false, error: 'Cloud sync not yet enabled. Configure Supabase URL/key in Settings (phase 2).' };
+  });
+}
