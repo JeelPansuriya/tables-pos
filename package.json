@@ -70,7 +70,8 @@
       {
         "provider": "github",
         "owner": "JeelPansuriya",
-        "repo": "tables-pos"
+        "repo": "tables-pos",
+        "releaseType": "release"
       }
     ]
   }
