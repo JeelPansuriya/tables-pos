@@ -52,42 +52,72 @@ function fmtLocal(s?: string | null): string {
   });
 }
 
-function pad(left: string, right: string, width = 32): string {
-  const space = Math.max(1, width - left.length - right.length);
-  return left + ' '.repeat(space) + right;
+// ---- Slip layout ------------------------------------------------------------
+// electron-pos-printer renders each line's `value` as HTML (innerHTML), so we
+// lay rows out with full-width flexbox rather than fixed-width character padding.
+// That makes content fill the whole 80mm paper, keeps amounts flush-right, and
+// lets long text (names, address) wrap inside a small side padding instead of
+// running off the edge. Only important lines are bold — not the whole bill.
+
+const FONT = "'Consolas','Roboto Mono','Courier New',monospace";
+const PADX = '8px'; // small breathing room on both sides
+
+function esc(s: string): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
-// Thermal heads print faint at normal weight, so every line is bold by default
-// and emphasized lines go heavier still (900). A crisp fixed-width font keeps the
-// padded columns aligned while printing darker than the default `monospace`.
-const FONT = "'Consolas','Roboto Mono','Courier New',monospace";
+function base(weight: 'normal' | 'bold', sizePx: number, align: 'left' | 'center'): Record<string, string> {
+  return {
+    'font-family': FONT,
+    'font-weight': weight,
+    'font-size': `${sizePx}px`,
+    'text-align': align,
+    width: '100%',
+    'box-sizing': 'border-box',
+    'padding-left': PADX,
+    'padding-right': PADX,
+    'overflow-wrap': 'anywhere',
+  };
+}
 
 const center = (text: string, bold = false, size: 'lg' | 'md' | 'sm' = 'md') => ({
   type: 'text',
-  value: text,
-  style: {
-    'text-align': 'center',
-    'font-weight': bold ? '900' : 'bold',
-    'font-size': size === 'lg' ? '20px' : size === 'md' ? '14px' : '11px',
-    'font-family': FONT,
-  },
+  value: esc(text),
+  style: base(bold ? 'bold' : 'normal', size === 'lg' ? 20 : size === 'md' ? 14 : 11, 'center'),
 });
+
 const left = (text: string, bold = false) => ({
   type: 'text',
-  value: text,
-  style: {
-    'text-align': 'left',
-    'font-weight': bold ? '900' : 'bold',
-    'font-size': '12px',
-    'font-family': FONT,
-    'white-space': 'pre',
-  },
+  value: esc(text),
+  style: base(bold ? 'bold' : 'normal', 12, 'left'),
 });
+
+/** Full-width row: label flush-left, value flush-right (value never wraps). */
+const row = (l: string, r: string, bold = false) => ({
+  type: 'text',
+  value:
+    `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">` +
+    `<span style="overflow-wrap:anywhere">${esc(l)}</span>` +
+    `<span style="white-space:nowrap">${esc(r)}</span></div>`,
+  style: base(bold ? 'bold' : 'normal', 12, 'left'),
+});
+
 const divider = () => ({
   type: 'text',
-  value: '--------------------------------',
-  style: { 'font-family': FONT, 'font-size': '12px', 'font-weight': 'bold' },
+  value: '',
+  style: {
+    'border-top': '1px dashed #000',
+    margin: '4px 0',
+    width: '100%',
+    'box-sizing': 'border-box',
+  },
 });
+
+// A few blank lines of paper feed at the end (HTML <br>, so it actually advances).
+const feed = () => ({ type: 'text', value: '<br><br><br>', style: { 'font-family': FONT } });
 
 function buildBillData(shop: SlipShop, bill: SlipBill, copyLabel: string): any[] {
   const lines: any[] = [];
@@ -106,24 +136,21 @@ function buildBillData(shop: SlipShop, bill: SlipBill, copyLabel: string): any[]
   if (bill.customer_mobile) lines.push(left(`Mob  : ${bill.customer_mobile}`));
   lines.push(divider());
 
-  lines.push(left(pad('Item              Qty', 'Amt')));
+  lines.push(row('Item', 'Amount', true));
   for (const it of bill.items) {
-    const nameLine = `${it.name}`.slice(0, 24);
-    lines.push(left(pad(nameLine, '')));
-    lines.push(left(pad(`  ${it.qty} x ${formatINR(it.unit_price)}`, formatINR(it.total))));
+    lines.push(left(it.name));
+    lines.push(row(`  ${it.qty} x ${formatINR(it.unit_price)}`, formatINR(it.total)));
   }
   lines.push(divider());
-  lines.push(left(pad('Subtotal', formatINR(bill.subtotal))));
-  if (bill.discount > 0) lines.push(left(pad('Discount', '-' + formatINR(bill.discount))));
-  lines.push(left(pad('TOTAL', formatINR(bill.total)), true));
+  lines.push(row('Subtotal', formatINR(bill.subtotal)));
+  if (bill.discount > 0) lines.push(row('Discount', '-' + formatINR(bill.discount)));
+  lines.push(row('TOTAL', formatINR(bill.total), true));
   lines.push(divider());
   for (const p of bill.payments) {
-    lines.push(
-      left(pad(`Paid (${p.mode})`, formatINR(p.amount)))
-    );
+    lines.push(row(`Paid (${p.mode})`, formatINR(p.amount)));
     if (p.mode === 'cash' && p.cash_received != null && p.change_given != null && p.change_given > 0) {
-      lines.push(left(pad('  Tendered', formatINR(p.cash_received))));
-      lines.push(left(pad('  Change', formatINR(p.change_given))));
+      lines.push(row('  Tendered', formatINR(p.cash_received)));
+      lines.push(row('  Change', formatINR(p.change_given)));
     }
   }
   if (bill.notes) {
@@ -132,9 +159,7 @@ function buildBillData(shop: SlipShop, bill: SlipBill, copyLabel: string): any[]
   }
   lines.push(divider());
   lines.push(center('Thank you! Visit again.', false, 'sm'));
-  // bottom feed — note printer driver setting "Page End ≠ Ignore page tails blank"
-  // is required for this CSS-side feed to actually advance the paper.
-  lines.push({ type: 'text', value: '\n\n\n', style: { 'font-family': 'monospace' } });
+  lines.push(feed());
   return lines;
 }
 
@@ -198,21 +223,22 @@ export async function printPreorderReceipt(
   lines.push(left(`Cust   : ${pre.customer_name}`));
   if (pre.customer_mobile) lines.push(left(`Mob    : ${pre.customer_mobile}`));
   lines.push(divider());
+  lines.push(row('Item', 'Amount', true));
   for (const it of pre.items) {
-    lines.push(left(`${it.name}`));
-    lines.push(left(pad(`  ${it.qty} x ${formatINR(it.unit_price)}`, formatINR(it.total))));
+    lines.push(left(it.name));
+    lines.push(row(`  ${it.qty} x ${formatINR(it.unit_price)}`, formatINR(it.total)));
   }
   lines.push(divider());
-  lines.push(left(pad('TOTAL', formatINR(pre.total)), true));
-  lines.push(left(pad('Advance paid', formatINR(pre.advance_paid))));
-  lines.push(left(pad('Balance due', formatINR(pre.balance_due)), true));
+  lines.push(row('TOTAL', formatINR(pre.total), true));
+  lines.push(row('Advance paid', formatINR(pre.advance_paid)));
+  lines.push(row('Balance due', formatINR(pre.balance_due), true));
   if (pre.notes) {
     lines.push(divider());
     lines.push(left(`Note: ${pre.notes}`));
   }
   lines.push(divider());
   lines.push(center('Please bring this slip on the day of order.', false, 'sm'));
-  lines.push({ type: 'text', value: '\n\n\n', style: { 'font-family': 'monospace' } });
+  lines.push(feed());
 
   const opts: any = {
     preview: false,
@@ -248,30 +274,29 @@ export async function printDaySummary(
   lines.push(center('DAY SUMMARY', true, 'sm'));
   lines.push(center(s.date, false, 'sm'));
   lines.push(divider());
-  lines.push(left(pad('Bills', String(s.totals.bills))));
-  lines.push(left(pad('Bill revenue', formatINR(s.totals.revenue))));
-  lines.push(left(pad('Plates', s.totals.plates.toFixed(1))));
-  lines.push(left(pad('Pre-order payments', formatINR(s.preorderPaid))));
-  lines.push(left(pad('TOTAL COLLECTED', formatINR(s.totalCollected)), true));
+  lines.push(row('Bills', String(s.totals.bills)));
+  lines.push(row('Bill revenue', formatINR(s.totals.revenue)));
+  lines.push(row('Plates', s.totals.plates.toFixed(1)));
+  lines.push(row('Pre-order payments', formatINR(s.preorderPaid)));
+  lines.push(row('TOTAL COLLECTED', formatINR(s.totalCollected), true));
   lines.push(divider());
   lines.push(left('By payment mode', true));
-  for (const m of s.byMode) lines.push(left(pad(`  ${m.mode}`, formatINR(m.amt))));
+  for (const m of s.byMode) lines.push(row(`  ${m.mode}`, formatINR(m.amt)));
   if (s.byMode.length === 0) lines.push(left('  (none)'));
   lines.push(divider());
   lines.push(left('By meal', true));
-  for (const m of s.byMeal)
-    lines.push(left(pad(`  ${m.meal_type} (${m.bills})`, formatINR(m.revenue))));
+  for (const m of s.byMeal) lines.push(row(`  ${m.meal_type} (${m.bills})`, formatINR(m.revenue)));
   lines.push(divider());
   lines.push(left('Items sold', true));
-  for (const it of s.items) lines.push(left(pad(`  ${it.name.slice(0, 18)} x${it.qty}`, formatINR(it.revenue))));
+  for (const it of s.items) lines.push(row(`  ${it.name} x${it.qty}`, formatINR(it.revenue)));
   if (s.items.length === 0) lines.push(left('  (none)'));
   if (s.cancelled.length > 0) {
     lines.push(divider());
-    lines.push(left(pad(`Cancelled (${s.cancelled.length})`, '-' + formatINR(s.cancelledTotal)), true));
+    lines.push(row(`Cancelled (${s.cancelled.length})`, '-' + formatINR(s.cancelledTotal), true));
   }
   lines.push(divider());
   lines.push(center('End of day', false, 'sm'));
-  lines.push({ type: 'text', value: '\n\n\n', style: { 'font-family': 'monospace' } });
+  lines.push(feed());
 
   const opts: any = {
     preview: false,
@@ -287,17 +312,9 @@ export async function printDaySummary(
 
 export async function printTestSlip(printerName: string): Promise<void> {
   const lines: any[] = [
-    {
-      type: 'text',
-      value: 'TEST PRINT',
-      style: { 'text-align': 'center', 'font-weight': '900', 'font-size': '20px', 'font-family': FONT },
-    },
-    {
-      type: 'text',
-      value: 'If you can read this, the printer is connected.',
-      style: { 'text-align': 'center', 'font-weight': 'bold', 'font-size': '12px', 'font-family': FONT },
-    },
-    { type: 'text', value: '\n\n\n', style: { 'font-family': FONT } },
+    center('TEST PRINT', true, 'lg'),
+    center('If you can read this, the printer is connected.', false, 'sm'),
+    feed(),
   ];
   const opts: any = {
     preview: false,
