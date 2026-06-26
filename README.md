@@ -101,6 +101,9 @@ create table if not exists v2_preorder_payments (
   id bigint primary key, preorder_id bigint references v2_preorders(id) on delete cascade,
   amount numeric, mode text, received_at text, notes text
 );
+create table if not exists v2_cash_counts (
+  date text primary key, counted_cash numeric, note text, counted_at text
+);
 
 -- RLS: allow the anon key to insert and (for pre-orders) update. Tighten as needed.
 alter table v2_bills enable row level security;
@@ -119,6 +122,10 @@ create policy v2_upd on v2_preorders        for update to anon using (true) with
 create policy v2_ins on v2_preorder_items   for insert to anon with check (true);
 create policy v2_upd on v2_preorder_items   for update to anon using (true) with check (true);
 create policy v2_ins on v2_preorder_payments for insert to anon with check (true);
+
+alter table v2_cash_counts enable row level security;
+create policy v2_ins on v2_cash_counts for insert to anon with check (true);
+create policy v2_upd on v2_cash_counts for update to anon using (true) with check (true);
 ```
 
 ## In-app updates
@@ -154,6 +161,7 @@ create policy v2_sel_auth on v2_bill_payments     for select to authenticated us
 create policy v2_sel_auth on v2_preorders         for select to authenticated using (true);
 create policy v2_sel_auth on v2_preorder_items    for select to authenticated using (true);
 create policy v2_sel_auth on v2_preorder_payments for select to authenticated using (true);
+create policy v2_sel_auth on v2_cash_counts        for select to authenticated using (true);
 ```
 
 ## Differences vs. v1 (POS-Billing-App)

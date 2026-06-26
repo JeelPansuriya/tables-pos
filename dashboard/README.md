@@ -33,6 +33,7 @@ so add **SELECT policies for the `authenticated` role** and create a viewer acco
    create policy v2_sel_auth on v2_preorders        for select to authenticated using (true);
    create policy v2_sel_auth on v2_preorder_items   for select to authenticated using (true);
    create policy v2_sel_auth on v2_preorder_payments for select to authenticated using (true);
+   create policy v2_sel_auth on v2_cash_counts        for select to authenticated using (true);
    ```
 
 2. **Create the login**: Supabase dashboard → **Authentication → Users → Add user** →

@@ -11,7 +11,9 @@ export default function QuickBillPage() {
   const [mealType, setMealType] = useState<MealType>(
     (settings.default_meal_type as MealType) || 'dinner'
   );
-  const [type, setType] = useState<'takeaway' | 'dine_in'>('takeaway');
+  // Quick billing is always a takeaway-type sale (dine-in goes through Tables).
+  // Takeaway-specific products live in the menu itself, so no type toggle.
+  const type = 'takeaway' as const;
   const [discount, setDiscount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -49,20 +51,7 @@ export default function QuickBillPage() {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center gap-2">
-        <h1 className="text-xl font-bold">Quick / Takeaway</h1>
-        <div className="ml-2 flex rounded-md border border-stone-300 bg-white p-0.5 text-sm">
-          {(['takeaway', 'dine_in'] as const).map((m) => (
-            <button
-              key={m}
-              className={`rounded px-3 py-1 ${
-                type === m ? 'bg-brand-600 text-white' : 'text-stone-700'
-              }`}
-              onClick={() => setType(m)}
-            >
-              {m === 'takeaway' ? 'Takeaway' : 'Dine-in (no table)'}
-            </button>
-          ))}
-        </div>
+        <h1 className="text-xl font-bold">Quick billing</h1>
       </div>
       {msg && <div className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{msg}</div>}
       <div className="grid flex-1 grid-cols-1 gap-3 overflow-hidden lg:grid-cols-[1fr_24rem]">

@@ -6,10 +6,11 @@ import UpdatePill from './UpdatePill';
 
 const navItems = [
   { to: '/', label: 'Tables' },
-  { to: '/quick', label: 'Quick / Takeaway' },
+  { to: '/quick', label: 'Quick billing' },
   { to: '/preorders', label: 'Pre-orders' },
   { to: '/bills', label: 'Bills' },
   { to: '/summary', label: 'Day Summary' },
+  { to: '/analytics', label: 'Analytics' },
   { to: '/menu', label: 'Menu' },
   { to: '/settings', label: 'Settings' },
 ];

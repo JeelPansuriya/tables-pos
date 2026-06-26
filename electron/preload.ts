@@ -94,8 +94,14 @@ const api = {
         print: boolean;
       }
     ) => invoke('bills:quickBill', payload),
-    list: (params: { from?: string; to?: string; status?: string; q?: string }) =>
-      invoke('bills:list', params),
+    list: (params: {
+      from?: string;
+      to?: string;
+      status?: string;
+      q?: string;
+      type?: string;
+      meal_type?: string;
+    }) => invoke('bills:list', params),
     get: (id: number) => invoke('bills:get', id),
     reprint: (id: number) => invoke('bills:reprint', id),
     void: (id: number, reason: string) => invoke('bills:void', { billId: id, reason }),
@@ -166,6 +172,14 @@ const api = {
   },
   daySummary: (date?: string) => invoke('day:summary', date),
   daySummaryPrint: (date?: string) => invoke('day:printSummary', date),
+  analytics: {
+    overview: (params: { from?: string; to?: string }) => invoke('analytics:overview', params),
+  },
+  cash: {
+    get: (date?: string) => invoke('cash:get', date),
+    set: (payload: { date: string; counted_cash: number; note?: string }) =>
+      invoke('cash:set', payload),
+  },
   audit: {
     list: (params: { from?: string; to?: string; q?: string }) =>
       invoke('audit:list', params),

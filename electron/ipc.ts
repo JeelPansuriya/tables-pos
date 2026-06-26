@@ -46,14 +46,16 @@ function defaultMealForNow(db: Database): MealType {
 }
 
 function nextTokenForToday(db: Database): number {
-  // Token numbers restart each calendar day. We key off opened_at (the bill's
-  // creation time) rather than closed_at so a bill opened before midnight keeps
-  // the same day's sequence even if it closes after midnight.
+  // Tokens are assigned at close and must be unique within the day they're
+  // issued, so we key off the close day (date('now')). Keying off opened_at
+  // caused collisions around midnight: two bills opened on different calendar
+  // days but closed the same day each restarted the sequence at 1. Counting
+  // bills already closed today (this bill isn't closed yet) keeps it gap-free.
   const row = db
     .prepare(
       `SELECT COALESCE(MAX(token_no), 0) AS m
        FROM bills
-       WHERE date(opened_at, 'localtime') = date('now', 'localtime')
+       WHERE date(closed_at, 'localtime') = date('now', 'localtime')
          AND token_no IS NOT NULL`
     )
     .get() as { m: number };
@@ -210,8 +212,21 @@ export function registerIpc() {
     return { ok: true, settings: out };
   });
 
+  // Cloud/Supabase connection keys are admin-only — a manager can't change
+  // where (or whether) data is backed up, even via a crafted call.
+  const ADMIN_ONLY_SETTINGS = new Set([
+    'supabase_url',
+    'supabase_anon_key',
+    'supabase_table_prefix',
+    'cloud_sync_enabled',
+  ]);
+
   ipcMain.handle('settings:set', (_e, entries: Record<string, string>) => {
-    requireSession();
+    const session = requireSession();
+    const touchesAdminKeys = Object.keys(entries).some((k) => ADMIN_ONLY_SETTINGS.has(k));
+    if (touchesAdminKeys && session.role !== 'admin') {
+      return { ok: false, error: 'Only an admin can change cloud/Supabase settings.' };
+    }
     const stmt = db.prepare(
       `INSERT INTO settings (key, value) VALUES (?, ?)
        ON CONFLICT(key) DO UPDATE SET value=excluded.value`
@@ -583,32 +598,46 @@ export function registerIpc() {
 
   ipcMain.handle('bills:list', (_e, params) => {
     requireSession();
-    const where: string[] = [];
+    // The Bills register only ever shows finalized sales: closed bills and
+    // voided ones (a closed bill later cancelled — it still carries a token).
+    // Open bills and auto-cancelled never-settled bills (no token) are excluded.
+    const where: string[] = [
+      `(b.status='closed' OR (b.status='cancelled' AND b.token_no IS NOT NULL))`,
+    ];
     const args: any[] = [];
+    // Date filters key off the day the sale settled (closed_at), falling back to
+    // opened_at, so a bill shows under the day it was billed.
+    const dayExpr = `date(COALESCE(b.closed_at, b.opened_at), 'localtime')`;
     if (params?.from) {
-      where.push(`date(opened_at, 'localtime') >= date(?)`);
+      where.push(`${dayExpr} >= date(?)`);
       args.push(params.from);
     }
     if (params?.to) {
-      where.push(`date(opened_at, 'localtime') <= date(?)`);
+      where.push(`${dayExpr} <= date(?)`);
       args.push(params.to);
     }
-    if (params?.status) {
-      where.push(`status = ?`);
-      args.push(params.status);
+    if (params?.status === 'closed') where.push(`b.status='closed'`);
+    if (params?.status === 'voided') where.push(`b.status='cancelled'`);
+    if (params?.type) {
+      where.push(`b.type = ?`);
+      args.push(params.type);
+    }
+    if (params?.meal_type) {
+      where.push(`b.meal_type = ?`);
+      args.push(params.meal_type);
     }
     if (params?.q) {
-      where.push(`(token_no = ? OR customer_name LIKE ? OR customer_mobile LIKE ?)`);
+      where.push(`(b.token_no = ? OR b.customer_name LIKE ? OR b.customer_mobile LIKE ?)`);
       const q = params.q;
       const num = parseInt(q, 10);
       args.push(Number.isFinite(num) ? num : -1, `%${q}%`, `%${q}%`);
     }
     const sql = `SELECT b.id, b.token_no, b.type, b.status, b.meal_type, b.total, b.plates,
-                        b.opened_at, b.closed_at, b.customer_name, b.customer_mobile,
+                        b.opened_at, b.closed_at, b.cancel_reason, b.customer_name, b.customer_mobile,
                         t.label AS table_label
                  FROM bills b LEFT JOIN tables t ON t.id=b.table_id
-                 ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-                 ORDER BY b.id DESC LIMIT 500`;
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY ${dayExpr} DESC, b.token_no DESC, b.id DESC LIMIT 500`;
     const rows = db.prepare(sql).all(...args);
     return { ok: true, bills: rows };
   });
@@ -1042,6 +1071,244 @@ export function registerIpc() {
     } catch (e: any) {
       return { ok: false, error: e?.message ?? String(e) };
     }
+  });
+
+  // -------- CASH RECONCILIATION --------
+  // Previous calendar day as YYYY-MM-DD.
+  function prevDayStr(d: string): string {
+    const x = new Date(d + 'T00:00:00');
+    x.setDate(x.getDate() - 1);
+    return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(
+      x.getDate()
+    ).padStart(2, '0')}`;
+  }
+  // Cash physically taken in on day `d`: cash-mode bill payments (by close day)
+  // plus cash-mode pre-order payments (by received day).
+  function cashCollectedFor(d: string): number {
+    const bill = (db
+      .prepare(
+        `SELECT COALESCE(SUM(bp.amount),0) AS a FROM bill_payments bp
+         JOIN bills b ON b.id=bp.bill_id
+         WHERE b.status='closed' AND bp.mode='cash' AND date(b.closed_at,'localtime')=?`
+      )
+      .get(d) as { a: number }).a;
+    const pre = (db
+      .prepare(
+        `SELECT COALESCE(SUM(amount),0) AS a FROM preorder_payments
+         WHERE mode='cash' AND date(received_at,'localtime')=?`
+      )
+      .get(d) as { a: number }).a;
+    return +(bill + pre).toFixed(2);
+  }
+  function countedFor(d: string): number | null {
+    const r = db.prepare(`SELECT counted_cash FROM cash_counts WHERE date=?`).get(d) as
+      | { counted_cash: number }
+      | undefined;
+    return r ? r.counted_cash : null;
+  }
+
+  // Reconcile a day's cash: expected drawer = yesterday's counted close + today's
+  // cash taken in; expense = expected − today's counted close (cash paid out).
+  ipcMain.handle('cash:get', (_e, date?: string) => {
+    requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const row = db
+      .prepare(`SELECT counted_cash, note, counted_at FROM cash_counts WHERE date=?`)
+      .get(d) as { counted_cash: number; note: string | null; counted_at: string } | undefined;
+    const prevDate = prevDayStr(d);
+    const prevCounted = countedFor(prevDate);
+    const todayCash = cashCollectedFor(d);
+    const counted = row ? row.counted_cash : null;
+    const expected = +((prevCounted ?? 0) + todayCash).toFixed(2);
+    const expense =
+      counted != null && prevCounted != null ? +(expected - counted).toFixed(2) : null;
+    return {
+      ok: true,
+      date: d,
+      counted,
+      note: row?.note ?? '',
+      countedAt: row?.counted_at ?? null,
+      prevDate,
+      prevCounted,
+      todayCash,
+      expected,
+      expense,
+    };
+  });
+
+  ipcMain.handle('cash:set', (_e, { date, counted_cash, note }) => {
+    const session = requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const amt = Math.max(0, parseFloat(counted_cash) || 0);
+    db.prepare(
+      `INSERT INTO cash_counts (date, counted_cash, note, counted_by_user_id, counted_at, sync_status)
+       VALUES (?, ?, ?, ?, datetime('now'), 'pending')
+       ON CONFLICT(date) DO UPDATE SET counted_cash=excluded.counted_cash, note=excluded.note,
+         counted_by_user_id=excluded.counted_by_user_id, counted_at=excluded.counted_at,
+         sync_status='pending'`
+    ).run(d, amt, note || null, session.userId);
+    logAudit(db, 'cash.set', { details: { date: d, counted_cash: amt } });
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // -------- ANALYTICS --------
+  // Aggregates over a date range (keyed off the close day) for the Analytics
+  // tab: daily series, by-hour (peak hours), weekday, payment modes, top items,
+  // and headline averages. Closed bills only; pre-order payments fold into the
+  // collected/mode totals on their received day.
+  ipcMain.handle('analytics:overview', (_e, params) => {
+    requireSession();
+    const to = params?.to || new Date().toISOString().slice(0, 10);
+    const from =
+      params?.from ||
+      (() => {
+        const d = new Date(to + 'T00:00:00');
+        d.setDate(d.getDate() - 29);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      })();
+    const day = `date(b.closed_at, 'localtime')`;
+    const closedRange = `b.status='closed' AND ${day} >= date(?) AND ${day} <= date(?)`;
+
+    const daily = db
+      .prepare(
+        `SELECT ${day} AS date, COUNT(*) AS bills, COALESCE(SUM(b.total),0) AS revenue,
+                COALESCE(SUM(b.plates),0) AS plates
+         FROM bills b WHERE ${closedRange} GROUP BY date ORDER BY date ASC`
+      )
+      .all(from, to) as Array<{ date: string; bills: number; revenue: number; plates: number }>;
+
+    const byHour = db
+      .prepare(
+        `SELECT CAST(strftime('%H', b.closed_at, 'localtime') AS INTEGER) AS hour,
+                COUNT(*) AS bills, COALESCE(SUM(b.total),0) AS revenue
+         FROM bills b WHERE ${closedRange} GROUP BY hour ORDER BY hour ASC`
+      )
+      .all(from, to) as Array<{ hour: number; bills: number; revenue: number }>;
+
+    const byWeekday = db
+      .prepare(
+        `SELECT CAST(strftime('%w', b.closed_at, 'localtime') AS INTEGER) AS dow,
+                COUNT(*) AS bills, COALESCE(SUM(b.total),0) AS revenue
+         FROM bills b WHERE ${closedRange} GROUP BY dow ORDER BY dow ASC`
+      )
+      .all(from, to) as Array<{ dow: number; bills: number; revenue: number }>;
+
+    const byMode = db
+      .prepare(
+        `SELECT mode, COALESCE(SUM(amt),0) AS amt FROM (
+           SELECT bp.mode AS mode, bp.amount AS amt
+             FROM bill_payments bp JOIN bills b ON b.id=bp.bill_id
+             WHERE ${closedRange}
+           UNION ALL
+           SELECT pp.mode AS mode, pp.amount AS amt FROM preorder_payments pp
+             WHERE date(pp.received_at,'localtime') >= date(?) AND date(pp.received_at,'localtime') <= date(?)
+         ) GROUP BY mode`
+      )
+      .all(from, to, from, to) as Array<{ mode: string; amt: number }>;
+
+    const topItems = db
+      .prepare(
+        `SELECT bi.name, SUM(bi.qty) AS qty, COALESCE(SUM(bi.total),0) AS revenue
+         FROM bill_items bi JOIN bills b ON b.id=bi.bill_id
+         WHERE ${closedRange} GROUP BY bi.name ORDER BY qty DESC LIMIT 15`
+      )
+      .all(from, to) as Array<{ name: string; qty: number; revenue: number }>;
+
+    // Pre-order money collected in range (by received day) — folded into total
+    // collected but kept distinct from bill revenue.
+    const preDaily = db
+      .prepare(
+        `SELECT date(received_at,'localtime') AS date, COALESCE(SUM(amount),0) AS amt
+         FROM preorder_payments
+         WHERE date(received_at,'localtime') >= date(?) AND date(received_at,'localtime') <= date(?)
+         GROUP BY date`
+      )
+      .all(from, to) as Array<{ date: string; amt: number }>;
+    const preByDate = new Map(preDaily.map((r) => [r.date, r.amt]));
+    const preorderCollected = +preDaily.reduce((s, r) => s + r.amt, 0).toFixed(2);
+
+    // Cash taken in per day (cash mode, bills by close day + pre-orders by
+    // received day), and the manager's end-of-day counted close per day.
+    const cashColl = db
+      .prepare(
+        `SELECT date, COALESCE(SUM(amt),0) AS amt FROM (
+           SELECT date(b.closed_at,'localtime') AS date, bp.amount AS amt
+             FROM bill_payments bp JOIN bills b ON b.id=bp.bill_id
+             WHERE b.status='closed' AND bp.mode='cash'
+               AND date(b.closed_at,'localtime') >= date(?) AND date(b.closed_at,'localtime') <= date(?)
+           UNION ALL
+           SELECT date(pp.received_at,'localtime') AS date, pp.amount AS amt
+             FROM preorder_payments pp WHERE pp.mode='cash'
+               AND date(pp.received_at,'localtime') >= date(?) AND date(pp.received_at,'localtime') <= date(?)
+         ) GROUP BY date`
+      )
+      .all(from, to, from, to) as Array<{ date: string; amt: number }>;
+    const cashByDate = new Map(cashColl.map((r) => [r.date, r.amt]));
+    // Counts in range plus the day before `from` (needed to expense the first day).
+    const counts = db
+      .prepare(`SELECT date, counted_cash FROM cash_counts WHERE date >= date(?) AND date <= date(?)`)
+      .all(prevDayStr(from), to) as Array<{ date: string; counted_cash: number }>;
+    const countByDate = new Map(counts.map((r) => [r.date, r.counted_cash]));
+
+    const dateSet = new Set<string>();
+    daily.forEach((d) => dateSet.add(d.date));
+    cashColl.forEach((r) => dateSet.add(r.date));
+    counts.forEach((r) => {
+      if (r.date >= from) dateSet.add(r.date);
+    });
+    const cash = [...dateSet].sort().map((date) => {
+      const collected = +(cashByDate.get(date) ?? 0).toFixed(2);
+      const counted = countByDate.has(date) ? countByDate.get(date)! : null;
+      const prevCounted = countByDate.has(prevDayStr(date)) ? countByDate.get(prevDayStr(date))! : null;
+      const expense =
+        counted != null && prevCounted != null
+          ? +((prevCounted + collected) - counted).toFixed(2)
+          : null;
+      return { date, collected, counted, expense };
+    });
+    const totalCashExpense = +cash.reduce((s, c) => s + (c.expense ?? 0), 0).toFixed(2);
+
+    const dailyOut = daily.map((d) => ({ ...d, preorder: +(preByDate.get(d.date) ?? 0).toFixed(2) }));
+
+    const revenue = daily.reduce((s, d) => s + d.revenue, 0);
+    const bills = daily.reduce((s, d) => s + d.bills, 0);
+    const plates = daily.reduce((s, d) => s + d.plates, 0);
+    const activeDays = daily.length;
+    const best = daily.reduce<{ date: string; revenue: number } | null>(
+      (m, d) => (!m || d.revenue > m.revenue ? { date: d.date, revenue: d.revenue } : m),
+      null
+    );
+    const peak = byHour.reduce<{ hour: number; revenue: number } | null>(
+      (m, h) => (!m || h.revenue > m.revenue ? { hour: h.hour, revenue: h.revenue } : m),
+      null
+    );
+
+    return {
+      ok: true,
+      from,
+      to,
+      daily: dailyOut,
+      byHour,
+      byWeekday,
+      byMode,
+      topItems,
+      cash,
+      totals: {
+        revenue: +revenue.toFixed(2),
+        billRevenue: +revenue.toFixed(2),
+        preorderCollected,
+        totalCollected: +(revenue + preorderCollected).toFixed(2),
+        bills,
+        plates,
+        activeDays,
+        avgPerDay: activeDays ? +(revenue / activeDays).toFixed(2) : 0,
+        avgPerPlate: plates ? +(revenue / plates).toFixed(2) : 0,
+        totalCashExpense,
+        bestDay: best,
+        peakHour: peak,
+      },
+    };
   });
 
   // -------- AUDIT --------

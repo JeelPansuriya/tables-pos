@@ -60,7 +60,12 @@ function fmtLocal(s?: string | null): string {
 // running off the edge. Only important lines are bold — not the whole bill.
 
 const FONT = "'Consolas','Roboto Mono','Courier New',monospace";
-const PADX = '8px'; // small breathing room on both sides
+const PADX = '6px'; // small breathing room on both sides
+// 80mm thermal heads only print ~72mm wide; laying the body out at the full
+// 80mm clips the right edge (where amounts sit). Constrain the printable body
+// width so content fills the paper without spilling into the dead zone.
+// Tune down (e.g. 70mm) if still clipped, or up (76mm) if there's a right gap.
+const PAGE_WIDTH = '72mm';
 
 function esc(s: string): string {
   return String(s)
@@ -148,10 +153,6 @@ function buildBillData(shop: SlipShop, bill: SlipBill, copyLabel: string): any[]
   lines.push(divider());
   for (const p of bill.payments) {
     lines.push(row(`Paid (${p.mode})`, formatINR(p.amount)));
-    if (p.mode === 'cash' && p.cash_received != null && p.change_given != null && p.change_given > 0) {
-      lines.push(row('  Tendered', formatINR(p.cash_received)));
-      lines.push(row('  Change', formatINR(p.change_given)));
-    }
   }
   if (bill.notes) {
     lines.push(divider());
@@ -179,6 +180,7 @@ export async function printBill(
     printerName: printerName || undefined,
     timeOutPerLine: 400,
     pageSize: '80mm',
+    width: PAGE_WIDTH,
     silent: true,
   };
 
@@ -247,6 +249,7 @@ export async function printPreorderReceipt(
     printerName: printerName || undefined,
     timeOutPerLine: 400,
     pageSize: '80mm',
+    width: PAGE_WIDTH,
     silent: true,
   };
   await PosPrinter.print(lines, opts);
@@ -290,10 +293,6 @@ export async function printDaySummary(
   lines.push(left('Items sold', true));
   for (const it of s.items) lines.push(row(`  ${it.name} x${it.qty}`, formatINR(it.revenue)));
   if (s.items.length === 0) lines.push(left('  (none)'));
-  if (s.cancelled.length > 0) {
-    lines.push(divider());
-    lines.push(row(`Cancelled (${s.cancelled.length})`, '-' + formatINR(s.cancelledTotal), true));
-  }
   lines.push(divider());
   lines.push(center('End of day', false, 'sm'));
   lines.push(feed());
@@ -305,6 +304,7 @@ export async function printDaySummary(
     printerName: printerName || undefined,
     timeOutPerLine: 400,
     pageSize: '80mm',
+    width: PAGE_WIDTH,
     silent: true,
   };
   await PosPrinter.print(lines, opts);
@@ -323,6 +323,7 @@ export async function printTestSlip(printerName: string): Promise<void> {
     printerName: printerName || undefined,
     timeOutPerLine: 400,
     pageSize: '80mm',
+    width: PAGE_WIDTH,
     silent: true,
   };
   await PosPrinter.print(lines, opts);

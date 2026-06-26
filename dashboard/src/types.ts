@@ -53,3 +53,9 @@ export type PreorderPayment = {
   mode: PayMode;
   received_at: string | null;
 };
+
+export type CashCount = {
+  date: string;
+  counted_cash: number;
+  note: string | null;
+};

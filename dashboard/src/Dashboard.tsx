@@ -14,8 +14,26 @@ import {
 import { supabase, table, TIMEZONE } from './supabase';
 import type { Bill, BillItem, BillPayment, Preorder, PreorderPayment } from './types';
 import { daySummary, dailyTrend, dayKeyOffset, todayKey, inr, bizDay } from './analytics';
+import AnalyticsView from './AnalyticsView';
 
-const WINDOW_DAYS = 30;
+// The Day tab only needs the last 14 days (the trend window); deeper history is
+// the Analytics tab's job. Keeping this small keeps each read cheap.
+const WINDOW_DAYS = 14;
+
+function tsMs(ts: string | null): number {
+  if (!ts) return 0;
+  const iso = ts.includes('T') ? ts : ts.replace(' ', 'T');
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(ts) ? iso : iso + 'Z');
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+function agoLabel(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m ago`;
+}
 
 /** UTC cutoff string ("YYYY-MM-DD 00:00:00") for the fetch window. */
 function cutoffIso(days: number): string {
@@ -52,6 +70,9 @@ export default function Dashboard({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState(todayKey());
+  const [view, setView] = useState<'day' | 'analytics'>('day');
+  const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
+  const [, forceTick] = useState(0); // re-render so "x min ago" stays fresh
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -99,6 +120,7 @@ export default function Dashboard({ session }: { session: Session }) {
         preorders: (preRes.data ?? []) as Preorder[],
         preorderPayments: (prePayRes.data ?? []) as PreorderPayment[],
       });
+      setLastLoadedAt(Date.now());
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -109,6 +131,28 @@ export default function Dashboard({ session }: { session: Session }) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Live counter check: while viewing today, refresh every 30 min and ONLY while
+  // the tab is visible — a backgrounded/sleeping phone fetches nothing. With
+  // several people using the dashboard this keeps total reads tiny and well
+  // inside Supabase's free egress. The tab also refreshes the moment it's
+  // reopened, and there's always the manual Refresh button for "right now".
+  const REFRESH_MS = 30 * 60 * 1000;
+  const isToday = date === todayKey();
+  useEffect(() => {
+    if (view !== 'day' || !isToday) return;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    const refresh = setInterval(refreshIfVisible, REFRESH_MS);
+    const tick = setInterval(() => forceTick((n) => n + 1), 60000);
+    document.addEventListener('visibilitychange', refreshIfVisible);
+    return () => {
+      clearInterval(refresh);
+      clearInterval(tick);
+      document.removeEventListener('visibilitychange', refreshIfVisible);
+    };
+  }, [view, isToday, load]);
 
   const summary = useMemo(() => {
     if (!data) return null;
@@ -140,17 +184,34 @@ export default function Dashboard({ session }: { session: Session }) {
             {session.user.email} · times in {TIMEZONE}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            className="input"
-            value={date}
-            max={todayKey()}
-            onChange={(e) => setDate(e.target.value)}
-          />
-          <button className="btn" onClick={load} disabled={loading}>
-            {loading ? '…' : 'Refresh'}
-          </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex rounded-md border border-stone-300 bg-white p-0.5 text-sm">
+            {(['day', 'analytics'] as const).map((v) => (
+              <button
+                key={v}
+                className={`rounded px-3 py-1 capitalize ${
+                  view === v ? 'bg-brand-700 text-white' : 'text-stone-700'
+                }`}
+                onClick={() => setView(v)}
+              >
+                {v === 'day' ? 'Day' : 'Analytics'}
+              </button>
+            ))}
+          </div>
+          {view === 'day' && (
+            <>
+              <input
+                type="date"
+                className="input"
+                value={date}
+                max={todayKey()}
+                onChange={(e) => setDate(e.target.value)}
+              />
+              <button className="btn" onClick={load} disabled={loading}>
+                {loading ? '…' : 'Refresh'}
+              </button>
+            </>
+          )}
           <button
             className="rounded-md border border-stone-300 px-3 py-2 text-sm"
             onClick={() => supabase.auth.signOut()}
@@ -160,7 +221,30 @@ export default function Dashboard({ session }: { session: Session }) {
         </div>
       </header>
 
-      {error && (
+      {view === 'analytics' && <AnalyticsView />}
+
+      {view === 'day' && isToday && lastLoadedAt && (
+        (() => {
+          const todayClosed = (data?.bills ?? []).filter(
+            (b) => b.status === 'closed' && bizDay(b.closed_at) === todayKey()
+          );
+          const lastSaleMs = todayClosed.reduce((mx, b) => Math.max(mx, tsMs(b.closed_at)), 0);
+          return (
+            <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+              <span className="flex items-center gap-1 font-medium">
+                <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+                Auto-updates every 30 min · tap Refresh for now
+              </span>
+              <span>Updated {agoLabel(Date.now() - lastLoadedAt)}</span>
+              <span>
+                Last sale: {lastSaleMs ? agoLabel(Date.now() - lastSaleMs) : 'none today'}
+              </span>
+            </div>
+          );
+        })()
+      )}
+
+      {view === 'day' && error && (
         <div className="mb-4 rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">
           {error}
           <div className="mt-1 text-xs text-rose-500">
@@ -170,7 +254,8 @@ export default function Dashboard({ session }: { session: Session }) {
         </div>
       )}
 
-      {loading && !data ? (
+      {view === 'day' &&
+        (loading && !data ? (
         <div className="py-20 text-center text-stone-400">Loading sales…</div>
       ) : summary ? (
         <>
@@ -250,15 +335,38 @@ export default function Dashboard({ session }: { session: Session }) {
               {pendingPreorders.length ? (
                 <table className="w-full text-sm">
                   <tbody>
-                    {pendingPreorders.slice(0, 10).map((p) => (
-                      <tr key={p.id} className="border-t border-stone-100">
-                        <td className="py-1.5">{p.customer_name}</td>
-                        <td className="py-1.5 text-stone-500">{p.for_date}</td>
-                        <td className="py-1.5 text-right tabular-nums text-amber-700">
-                          {p.balance_due > 0 ? `due ${inr(p.balance_due)}` : 'paid'}
-                        </td>
-                      </tr>
-                    ))}
+                    {[...pendingPreorders]
+                      .sort((a, b) => (a.for_date || '').localeCompare(b.for_date || ''))
+                      .slice(0, 12)
+                      .map((p) => {
+                        const due =
+                          p.for_date === todayKey()
+                            ? { label: 'Today', cls: 'bg-amber-200 text-amber-900' }
+                            : p.for_date === dayKeyOffset(-1)
+                            ? { label: 'Tomorrow', cls: 'bg-sky-200 text-sky-900' }
+                            : null;
+                        return (
+                          <tr key={p.id} className="border-t border-stone-100">
+                            <td className="py-1.5">{p.customer_name}</td>
+                            <td className="py-1.5 text-stone-500">
+                              {due ? (
+                                <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${due.cls}`}>
+                                  {due.label}
+                                </span>
+                              ) : (
+                                p.for_date
+                              )}
+                            </td>
+                            <td
+                              className={`py-1.5 text-right tabular-nums ${
+                                p.balance_due > 0 ? 'font-medium text-rose-700' : 'text-emerald-700'
+                              }`}
+                            >
+                              {p.balance_due > 0 ? `due ${inr(p.balance_due)}` : 'paid'}
+                            </td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                 </table>
               ) : (
@@ -272,7 +380,7 @@ export default function Dashboard({ session }: { session: Session }) {
             loaded · today is {bizDay(new Date().toISOString())}
           </p>
         </>
-      ) : null}
+      ) : null)}
     </div>
   );
 }

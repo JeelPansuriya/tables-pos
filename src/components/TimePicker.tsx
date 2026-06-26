@@ -41,9 +41,9 @@ export default function TimePicker({ value, onChange }: Props) {
   }
 
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex flex-wrap items-center gap-1">
       <select
-        className="input w-16"
+        className="input w-14"
         value={h12}
         onChange={(e) => emit(e.target.value === '' ? '' : parseInt(e.target.value, 10), min, ampm)}
       >
@@ -56,7 +56,7 @@ export default function TimePicker({ value, onChange }: Props) {
       </select>
       <span className="text-stone-400">:</span>
       <select
-        className="input w-16"
+        className="input w-14"
         value={min}
         disabled={h12 === ''}
         onChange={(e) => emit(h12, parseInt(e.target.value, 10), ampm)}

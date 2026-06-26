@@ -8,6 +8,12 @@ import { addToItems } from '../components/BillEditor';
 import PaymentBar, { type PaymentEntry } from '../components/PaymentBar';
 import ReasonModal from '../components/ReasonModal';
 
+// Lunch before the configured cutoff hour (default 17 = 5pm), dinner after —
+// so the default meal flips to dinner automatically each evening.
+function mealForNow(lunchUntilHour: number): MealType {
+  return new Date().getHours() < lunchUntilHour ? 'lunch' : 'dinner';
+}
+
 export default function TablesPage() {
   const { menu, settings } = useStore();
   const [tiles, setTiles] = useState<TableTile[]>([]);
@@ -18,12 +24,15 @@ export default function TablesPage() {
   const [activeTableLabel, setActiveTableLabel] = useState('');
   const [items, setItems] = useState<EditorItem[]>([]);
   const [discount, setDiscount] = useState(0);
-  const [mealType, setMealType] = useState<MealType>(
-    (settings.default_meal_type as MealType) || 'dinner'
-  );
-  const [defaultMeal, setDefaultMeal] = useState<MealType>(
-    (settings.default_meal_type as MealType) || 'dinner'
-  );
+  const lunchUntil = parseInt(settings.lunch_until_hour || '17', 10) || 17;
+  const [mealType, setMealType] = useState<MealType>(mealForNow(lunchUntil));
+  const [defaultMeal, setDefaultMeal] = useState<MealType>(mealForNow(lunchUntil));
+
+  // One control drives both the meal for new bills and the price shown on tiles.
+  function changeMeal(m: MealType) {
+    setDefaultMeal(m);
+    setMealType(m);
+  }
 
   const [cancelOpen, setCancelOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -86,6 +95,13 @@ export default function TablesPage() {
 
   function selectTable(t: TableTile) {
     setSelectedTableId(t.id);
+    // If the table already has open bill(s), jump straight into one (the first)
+    // instead of making the user click again — unless we're already on one of
+    // this table's bills.
+    const alreadyOnThisTable = t.openBills.some((b) => b.id === activeBillId);
+    if (!alreadyOnThisTable && t.openBills.length >= 1) {
+      void loadBill(t.openBills[0].id, t.label);
+    }
   }
 
   async function newBillFor(tableId: number, label: string) {
@@ -180,7 +196,7 @@ export default function TablesPage() {
         <div className="flex items-center gap-2">
           <h1 className="text-xl font-bold">Tables</h1>
           <div className="ml-auto flex items-center gap-2 text-sm">
-            <span className="text-stone-500">Default meal for new bills:</span>
+            <span className="text-stone-500">Meal:</span>
             <div className="flex rounded-md border border-stone-300 bg-white p-0.5 text-sm">
               {(['lunch', 'dinner'] as MealType[]).map((m) => (
                 <button
@@ -188,7 +204,7 @@ export default function TablesPage() {
                   className={`rounded px-3 py-1 ${
                     defaultMeal === m ? 'bg-brand-600 text-white' : 'text-stone-700'
                   }`}
-                  onClick={() => setDefaultMeal(m)}
+                  onClick={() => changeMeal(m)}
                 >
                   {m}
                 </button>
@@ -314,8 +330,8 @@ export default function TablesPage() {
           <MenuGrid
             menu={menu}
             mealType={mealType}
-            onMealChange={setMealType}
             onAdd={(item) => setItems((cur) => addToItems(cur, item))}
+            showMealToggle={false}
             disabled={!activeBillId}
             scroll={false}
             padTiles

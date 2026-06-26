@@ -56,12 +56,18 @@ export default function BillItemList({ items, onChange, title, showSubtotal = tr
                   </div>
                   <div className="flex items-center gap-1 text-xs text-stone-500">
                     <span>₹</span>
-                    <input
-                      type="number"
-                      className="w-20 rounded border border-stone-200 px-1 py-0.5 text-xs"
-                      value={it.unit_price}
-                      onChange={(e) => setPrice(idx, parseFloat(e.target.value) || 0)}
-                    />
+                    {it.is_custom ? (
+                      // Only custom items have an editable price; fixed menu
+                      // items are locked to their configured menu price.
+                      <input
+                        type="number"
+                        className="w-20 rounded border border-stone-200 px-1 py-0.5 text-xs"
+                        value={it.unit_price}
+                        onChange={(e) => setPrice(idx, parseFloat(e.target.value) || 0)}
+                      />
+                    ) : (
+                      <span className="font-medium text-stone-700">{it.unit_price}</span>
+                    )}
                     <span>× {it.qty} = ₹{(it.unit_price * it.qty).toFixed(2)}</span>
                   </div>
                 </div>
@@ -72,7 +78,7 @@ export default function BillItemList({ items, onChange, title, showSubtotal = tr
                   >
                     −
                   </button>
-                  <span className="w-8 text-center font-semibold">{it.qty}</span>
+                  <span className="w-12 text-center font-semibold">{it.qty}</span>
                   <button
                     className="rounded-md border border-stone-300 px-2 text-lg leading-none hover:bg-stone-100"
                     onClick={() => setQty(idx, it.qty + 1)}

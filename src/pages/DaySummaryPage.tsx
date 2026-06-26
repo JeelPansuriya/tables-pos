@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
-import { fmtDateTime } from '../format';
 
 type Summary = {
   date: string;
@@ -20,8 +19,23 @@ type Summary = {
   cancelledTotal: number;
 };
 
+// Local calendar date as YYYY-MM-DD (toISOString is UTC and shifts the day in
+// +offset timezones, which broke the Prev/Next buttons near midnight).
+function ymd(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate()
+  ).padStart(2, '0')}`;
+}
+
+const MODE_COLORS: Record<string, string> = {
+  cash: 'bg-emerald-100 text-emerald-800',
+  upi: 'bg-sky-100 text-sky-800',
+  card: 'bg-violet-100 text-violet-800',
+  other: 'bg-stone-100 text-stone-700',
+};
+
 export default function DaySummaryPage() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = ymd(new Date());
   const [date, setDate] = useState(today);
   const [data, setData] = useState<Summary | null>(null);
   const [printMsg, setPrintMsg] = useState<string | null>(null);
@@ -41,9 +55,9 @@ export default function DaySummaryPage() {
   }
 
   function shiftDay(days: number) {
-    const d = new Date(date + 'T00:00:00');
+    const d = new Date(date + 'T00:00:00'); // local midnight
     d.setDate(d.getDate() + days);
-    setDate(d.toISOString().slice(0, 10));
+    setDate(ymd(d)); // format in local time — no UTC drift
   }
 
   if (!data) return <div>Loading…</div>;
@@ -104,8 +118,16 @@ export default function DaySummaryPage() {
             <tbody>
               {data.byMode.map((m) => (
                 <tr key={m.mode} className="border-t border-stone-100">
-                  <td className="p-1 capitalize">{m.mode}</td>
-                  <td className="p-1">₹{m.amt.toFixed(2)}</td>
+                  <td className="p-1">
+                    <span
+                      className={`rounded px-2 py-0.5 text-xs font-medium capitalize ${
+                        MODE_COLORS[m.mode] ?? MODE_COLORS.other
+                      }`}
+                    >
+                      {m.mode}
+                    </span>
+                  </td>
+                  <td className="p-1 font-medium">₹{m.amt.toFixed(2)}</td>
                 </tr>
               ))}
               {data.byMode.length === 0 && (
@@ -170,45 +192,116 @@ export default function DaySummaryPage() {
         </table>
       </div>
 
-      <div className="card p-3">
-        <div className="mb-2 flex items-baseline justify-between">
-          <span className="text-sm font-semibold">Cancelled / voided bills</span>
-          <span className="text-sm text-rose-700">
-            {(data.cancelled ?? []).length} bill{(data.cancelled ?? []).length === 1 ? '' : 's'} · −₹
-            {(data.cancelledTotal ?? 0).toFixed(2)}
-          </span>
-        </div>
-        <table className="w-full text-sm">
-          <thead className="text-left text-stone-500">
-            <tr>
-              <th className="p-1">Token</th>
-              <th className="p-1">Amount</th>
-              <th className="p-1">Reason</th>
-              <th className="p-1">Voided at</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(data.cancelled ?? []).map((c) => (
-              <tr key={c.id} className="border-t border-stone-100">
-                <td className="p-1">{c.token_no ?? '—'}</td>
-                <td className="p-1 text-rose-700">−₹{c.total.toFixed(2)}</td>
-                <td className="p-1">{c.cancel_reason || '—'}</td>
-                <td className="p-1 text-stone-500">{fmtDateTime(c.cancelled_at)}</td>
-              </tr>
-            ))}
-            {(data.cancelled ?? []).length === 0 && (
-              <tr>
-                <td colSpan={4} className="p-2 text-stone-500">
-                  No cancelled bills.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        <p className="mt-2 text-xs text-stone-500">
-          Voided amounts are already excluded from Revenue and the totals above.
-        </p>
+      <CashCard date={date} />
+    </div>
+  );
+}
+
+type CashInfo = {
+  date: string;
+  counted: number | null;
+  note: string;
+  prevDate: string;
+  prevCounted: number | null;
+  todayCash: number;
+  expected: number;
+  expense: number | null;
+};
+
+// End-of-day cash reconciliation. The manager counts the drawer; expense is
+// (yesterday's close + today's cash taken in) − today's count.
+function CashCard({ date }: { date: string }) {
+  const [info, setInfo] = useState<CashInfo | null>(null);
+  const [draft, setDraft] = useState('');
+  const [note, setNote] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function load() {
+    const r = await api.cash.get(date);
+    if (r?.ok) {
+      setInfo(r);
+      setDraft(r.counted != null ? String(r.counted) : '');
+      setNote(r.note || '');
+    }
+  }
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date]);
+
+  async function save() {
+    const r = await api.cash.set({ date, counted_cash: parseFloat(draft) || 0, note });
+    setMsg(r?.ok ? 'Saved.' : r?.error || 'Failed');
+    setTimeout(() => setMsg(null), 2500);
+    await load();
+  }
+
+  if (!info) return null;
+  const counted = parseFloat(draft);
+  const liveExpense =
+    !isNaN(counted) && info.prevCounted != null ? +(info.expected - counted).toFixed(2) : null;
+
+  return (
+    <div className="card space-y-3 p-3">
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold">Cash reconciliation</h2>
+        {msg && <span className="text-xs text-emerald-700">{msg}</span>}
       </div>
+      <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+        <Box label={`Prev close (${info.prevDate.slice(5)})`} value={info.prevCounted != null ? `₹${info.prevCounted.toFixed(2)}` : '—'} />
+        <Box label="Cash taken in today" value={`₹${info.todayCash.toFixed(2)}`} tone="emerald" />
+        <Box label="Expected in drawer" value={`₹${info.expected.toFixed(2)}`} />
+        <Box
+          label="Cash expense"
+          value={liveExpense == null ? '—' : `₹${liveExpense.toFixed(2)}`}
+          tone={liveExpense != null && liveExpense > 0 ? 'rose' : liveExpense != null ? 'emerald' : undefined}
+        />
+      </div>
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="text-xs text-stone-600">Cash counted (end of day)</label>
+          <input
+            type="number"
+            min={0}
+            className="input w-40"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="₹"
+          />
+        </div>
+        <div className="flex-1">
+          <label className="text-xs text-stone-600">Note (optional)</label>
+          <input className="input w-full" value={note} onChange={(e) => setNote(e.target.value)} />
+        </div>
+        <button className="btn-primary" onClick={save}>
+          Save count
+        </button>
+      </div>
+      {info.prevCounted == null && (
+        <p className="text-xs text-amber-700">
+          No cash count saved for {info.prevDate} — the expense can't be computed until the previous
+          day is counted.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Box({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: 'emerald' | 'rose';
+}) {
+  const color =
+    tone === 'emerald' ? 'text-emerald-700' : tone === 'rose' ? 'text-rose-700' : 'text-stone-800';
+  return (
+    <div className="rounded-md border border-stone-200 p-2">
+      <div className="text-xs text-stone-500">{label}</div>
+      <div className={`mt-0.5 text-lg font-bold ${color}`}>{value}</div>
     </div>
   );
 }

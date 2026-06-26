@@ -8,6 +8,7 @@ import MenuPage from './pages/MenuPage';
 import CustomOrdersPage from './pages/CustomOrdersPage';
 import QuickBillPage from './pages/QuickBillPage';
 import DaySummaryPage from './pages/DaySummaryPage';
+import AnalyticsPage from './pages/AnalyticsPage';
 import SettingsPage from './pages/SettingsPage';
 import AuditPage from './pages/AuditPage';
 import BillsPage from './pages/BillsPage';
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/menu" element={<MenuPage />} />
         <Route path="/bills" element={<BillsPage />} />
         <Route path="/summary" element={<DaySummaryPage />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/audit" element={<AuditPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

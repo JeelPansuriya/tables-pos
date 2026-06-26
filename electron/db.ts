@@ -174,7 +174,21 @@ function initSchema(db: Database.Database) {
       details TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+
+    CREATE TABLE IF NOT EXISTS cash_counts (
+      date TEXT PRIMARY KEY,                -- business day YYYY-MM-DD (local)
+      counted_cash REAL NOT NULL,           -- cash physically counted at end of day
+      note TEXT,
+      counted_by_user_id INTEGER REFERENCES users(id),
+      counted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sync_status TEXT NOT NULL DEFAULT 'pending'
+    );
   `);
+
+  // Migrate older dev databases that created cash_counts without sync_status.
+  if (!tableHasColumn(db, 'cash_counts', 'sync_status')) {
+    db.exec(`ALTER TABLE cash_counts ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending'`);
+  }
 
   seedTables(db);
   seedDefaults(db);
@@ -200,7 +214,7 @@ function seedDefaults(db: Database.Database) {
     ['restaurant_phone', ''],
     ['gst_no', ''],
     ['default_meal_type', 'dinner'],
-    ['lunch_until_hour', '16'],
+    ['lunch_until_hour', '17'],
     ['printer_name', ''],
     ['printer_copies', '1'],
     ['supabase_url', ''],

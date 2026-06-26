@@ -2,7 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 
-const fields: Array<{ key: string; label: string; type?: string; help?: string }> = [
+type Field = { key: string; label: string; type?: string; help?: string };
+
+// Everyday settings — editable by any signed-in user (manager or admin).
+const fields: Array<Field> = [
   { key: 'restaurant_name', label: 'Restaurant name' },
   { key: 'restaurant_address', label: 'Address' },
   { key: 'restaurant_phone', label: 'Phone' },
@@ -12,6 +15,11 @@ const fields: Array<{ key: string; label: string; type?: string; help?: string }
   { key: 'printer_name', label: 'Printer name (exact)' },
   { key: 'printer_copies', label: 'Customer copies to print', type: 'number', help: 'How many identical customer slips per bill (default 1). Manager copy is no longer printed.' },
   { key: 'discount_max_pct', label: 'Max discount % (0–100)', type: 'number' },
+];
+
+// Cloud/Supabase connection — admin only. Managers must not be able to change
+// where (or whether) data is backed up.
+const cloudFields: Array<Field> = [
   { key: 'supabase_url', label: 'Supabase URL', help: 'e.g. https://xxxx.supabase.co' },
   { key: 'supabase_anon_key', label: 'Supabase anon key' },
   { key: 'supabase_table_prefix', label: 'Cloud table prefix', help: 'Defaults to "v2_" — keeps this app isolated from the v1 dataset.' },
@@ -40,14 +48,21 @@ export default function SettingsPage() {
     if (r?.ok) setUsers(r.users);
   }
 
-  async function save() {
-    const r = await api.settings.set(draft);
+  // Persist only the given keys, so the general Save never sends admin-only
+  // cloud keys (which the backend rejects for managers).
+  async function persist(keys: string[]) {
+    const subset: Record<string, string> = {};
+    for (const k of keys) subset[k] = draft[k] ?? '';
+    const r = await api.settings.set(subset);
     if (r?.ok) {
       setMsg('Saved.');
       await refreshSettings();
       await refreshCloud();
     } else setMsg(r?.error || 'Save failed');
   }
+
+  const save = () => persist(fields.map((f) => f.key));
+  const saveCloud = () => persist(cloudFields.map((f) => f.key));
 
   async function doSync() {
     const r = await syncNow();
@@ -134,7 +149,24 @@ export default function SettingsPage() {
 
       {session?.role === 'admin' && (
         <div className="card p-4 space-y-3">
-          <h2 className="text-sm font-semibold">Cloud backup</h2>
+          <h2 className="text-sm font-semibold">Cloud backup (admin only)</h2>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {cloudFields.map((f) => (
+              <div key={f.key}>
+                <label className="text-xs text-stone-600">{f.label}</label>
+                <input
+                  className="input"
+                  type={f.type || 'text'}
+                  value={draft[f.key] ?? ''}
+                  onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+                />
+                {f.help && <p className="mt-1 text-xs text-stone-500">{f.help}</p>}
+              </div>
+            ))}
+          </div>
+          <button className="btn-primary w-fit" onClick={saveCloud}>
+            Save cloud settings
+          </button>
           {!cloud?.configured ? (
             <p className="text-sm text-stone-600">
               Add your Supabase URL and anon key above, set <code>Cloud sync enabled</code> to{' '}

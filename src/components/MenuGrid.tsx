@@ -118,7 +118,7 @@ export default function MenuGrid({
             −
           </button>
           <input
-            className="w-10 rounded border border-stone-300 px-1 py-0.5 text-center"
+            className="w-14 rounded border border-stone-300 px-1 py-0.5 text-center"
             type="number"
             min={1}
             value={qty}

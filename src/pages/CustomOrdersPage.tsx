@@ -249,9 +249,12 @@ export default function CustomOrdersPage() {
   }
 
   const today = localToday();
-  const dueToday = list.filter(
-    (p) => p.for_date === today && p.status !== 'fulfilled' && p.status !== 'cancelled'
-  ).length;
+  // Today's outstanding orders, and the full list newest-first (most recently
+  // placed at the top).
+  const todays = list
+    .filter((p) => p.for_date === today && p.status !== 'fulfilled' && p.status !== 'cancelled')
+    .sort((a, b) => b.id - a.id);
+  const sortedList = [...list].sort((a, b) => b.id - a.id);
 
   return (
     <div className="space-y-3">
@@ -261,9 +264,26 @@ export default function CustomOrdersPage() {
           + New pre-order
         </button>
       </div>
-      {dueToday > 0 && (
-        <div className="rounded-md bg-amber-100 px-3 py-2 text-sm font-medium text-amber-900">
-          {dueToday} pre-order{dueToday === 1 ? '' : 's'} due today — highlighted below.
+      {todays.length > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <div className="mb-2 text-sm font-semibold text-amber-900">
+            Due today ({todays.length})
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {todays.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setDetailId(p.id)}
+                className="rounded-md border border-amber-300 bg-white px-3 py-2 text-left text-sm hover:bg-amber-100"
+              >
+                <div className="font-medium">{p.customer_name}</div>
+                <div className="text-xs text-stone-500">
+                  {p.for_time || '—'} {p.meal_type ? `· ${p.meal_type}` : ''} · ₹{p.total.toFixed(0)}
+                  {p.balance_due > 0 ? ` · due ₹${p.balance_due.toFixed(0)}` : ' · paid'}
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       <div className="card flex flex-wrap items-end gap-2 p-3">
@@ -302,7 +322,7 @@ export default function CustomOrdersPage() {
             </tr>
           </thead>
           <tbody>
-            {list.map((p) => {
+            {sortedList.map((p) => {
               const isDueToday =
                 p.for_date === today && p.status !== 'fulfilled' && p.status !== 'cancelled';
               return (
@@ -527,7 +547,10 @@ function PreorderDetail({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
-      <div className="card w-full max-w-lg space-y-3 p-5" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="card w-full max-w-3xl max-h-[90vh] space-y-3 overflow-y-auto p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">
             Pre-order #{p?.order_no ?? id}
@@ -569,7 +592,8 @@ function PreorderDetail({
             )}
 
             {(terminal || tab === 'overview') && (
-              <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-3">
             <div className="text-sm text-stone-700">
               <div>
                 <strong>{p.customer_name}</strong>
@@ -607,6 +631,8 @@ function PreorderDetail({
                 </strong>
               </div>
             </div>
+                </div>
+                <div className="space-y-3">
 
             {data!.payments.length > 0 && (
               <div className="text-xs text-stone-500">
@@ -658,11 +684,13 @@ function PreorderDetail({
                 )}
               </div>
             )}
-              </>
+                </div>
+              </div>
             )}
 
             {!terminal && tab === 'edit' && (
-              <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div className="col-span-2">
                     <label className="text-xs text-stone-600">Customer name</label>
@@ -724,6 +752,8 @@ function PreorderDetail({
                     Save changes
                   </button>
                 </div>
+                </div>
+                <div className="space-y-3">
 
                 {/* Items: edit qty/price, remove, or add */}
                 <div className="space-y-2 border-t border-stone-200 pt-3">
@@ -789,6 +819,7 @@ function PreorderDetail({
                     </button>
                   </div>
                   <p className="text-xs text-stone-500">Counted on the order's placement day.</p>
+                </div>
                 </div>
               </div>
             )}

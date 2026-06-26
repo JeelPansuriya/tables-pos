@@ -110,6 +110,7 @@ export async function syncPending(): Promise<SyncResult> {
   try {
     const syncedBills = await pushBills(db, cfg);
     const syncedPreorders = await pushPreorders(db, cfg);
+    await pushCashCounts(db, cfg);
     setSetting('last_sync_at', new Date().toISOString());
     setSetting('last_sync_error', '');
     return { ok: true, syncedBills, syncedPreorders };
@@ -211,6 +212,27 @@ async function pushPreorders(db: Database, cfg: CloudConfig): Promise<number> {
   return ids.length;
 }
 
+/**
+ * Push the daily cash-count / reconciliation rows. The table is tiny (one row
+ * per day) and rows can be edited later, so we upsert all of them with
+ * merge-duplicates rather than tracking a per-row sync flag.
+ */
+async function pushCashCounts(db: Database, cfg: CloudConfig): Promise<number> {
+  const rows = db
+    .prepare(
+      `SELECT date, counted_cash, note, counted_at FROM cash_counts
+       WHERE sync_status = 'pending' ORDER BY date ASC`
+    )
+    .all() as Array<{ date: string }>;
+  if (rows.length === 0) return 0;
+  const err = await upsert(cfg, 'cash_counts', rows, 'merge-duplicates');
+  if (err) throw new Error(`cash_counts: ${err}`);
+  const mark = db.prepare(`UPDATE cash_counts SET sync_status='synced' WHERE date=?`);
+  const tx = db.transaction(() => rows.forEach((r) => mark.run(r.date)));
+  tx();
+  return rows.length;
+}
+
 /** Count rows actually eligible for sync (terminal bills + all pre-orders). */
 export function pendingCount(): number {
   const db = getDb();
@@ -223,7 +245,10 @@ export function pendingCount(): number {
   const p = db
     .prepare(`SELECT COUNT(*) AS c FROM preorders WHERE sync_status = 'pending'`)
     .get() as { c: number };
-  return b.c + p.c;
+  const cash = db
+    .prepare(`SELECT COUNT(*) AS c FROM cash_counts WHERE sync_status = 'pending'`)
+    .get() as { c: number };
+  return b.c + p.c + cash.c;
 }
 
 export function cloudStatus() {
@@ -253,7 +278,9 @@ export function scheduleSoon(delayMs = 4000) {
 export function startCloudScheduler(everyMs = 3 * 60 * 1000) {
   if (intervalTimer) return;
   intervalTimer = setInterval(() => {
-    if (cloudEnabled()) void syncPending();
+    // Only hit the network when there's actually something to push — an idle
+    // counter makes no cloud calls at all.
+    if (cloudEnabled() && pendingCount() > 0) void syncPending();
   }, everyMs);
   // First pass shortly after boot so a backlog from the last session goes up.
   scheduleSoon(8000);
