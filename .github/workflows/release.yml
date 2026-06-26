@@ -1,12 +1,20 @@
 name: Release
 
+# Build the Windows installer and publish it — together with the auto-update
+# metadata (latest.yml + blockmap) that electron-updater needs — to a GitHub
+# Release whenever a version tag is pushed, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+
 on:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,11 +23,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm run build
+      # electron-builder --publish always uploads the installer AND latest.yml
+      # (the feed the in-app updater reads) to the release for this tag.
+      - run: npm run release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

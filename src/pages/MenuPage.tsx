@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
+import ReasonModal from '../components/ReasonModal';
 
 type Row = {
   id?: number;
@@ -31,6 +32,8 @@ export default function MenuPage() {
   const { refreshMenu } = useStore();
   const [rows, setRows] = useState<Row[]>([]);
   const [editing, setEditing] = useState<Row | null>(null);
+  const [hideRow, setHideRow] = useState<Row | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
 
   async function refresh() {
     const r = await api.menu.list();
@@ -49,10 +52,11 @@ export default function MenuPage() {
     });
     if (r?.ok) {
       setEditing(null);
+      setMsg('Saved.');
       await refresh();
       await refreshMenu();
     } else {
-      alert(r?.error || 'Save failed');
+      setMsg(r?.error || 'Save failed');
     }
   }
 
@@ -62,9 +66,10 @@ export default function MenuPage() {
     await refreshMenu();
   }
 
-  async function softDelete(row: Row) {
-    if (!confirm(`Hide "${row.name}" from the menu?`)) return;
+  async function doHide(row: Row) {
+    setHideRow(null);
     await api.menu.delete(row.id!);
+    setMsg(`"${row.name}" hidden from the menu.`);
     await refresh();
     await refreshMenu();
   }
@@ -77,6 +82,9 @@ export default function MenuPage() {
           + Add item
         </button>
       </div>
+      {msg && (
+        <div className="rounded-md bg-stone-100 px-3 py-2 text-sm text-stone-700">{msg}</div>
+      )}
 
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
@@ -119,7 +127,7 @@ export default function MenuPage() {
                   </button>
                   <button
                     className="btn-ghost text-xs text-red-700"
-                    onClick={() => softDelete(r)}
+                    onClick={() => setHideRow(r)}
                   >
                     Hide
                   </button>
@@ -152,12 +160,14 @@ export default function MenuPage() {
                 />
               </div>
               <div>
-                <label className="text-xs text-stone-600">Shortcut key</label>
+                <label className="text-xs text-stone-600">Shortcut key (1–2 letters)</label>
                 <input
                   className="input"
-                  maxLength={1}
+                  maxLength={2}
                   value={editing.shortcut_key ?? ''}
-                  onChange={(e) => setEditing({ ...editing, shortcut_key: e.target.value })}
+                  onChange={(e) =>
+                    setEditing({ ...editing, shortcut_key: e.target.value.toLowerCase() })
+                  }
                 />
               </div>
               <div>
@@ -233,6 +243,18 @@ export default function MenuPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {hideRow && (
+        <ReasonModal
+          title={`Hide "${hideRow.name}" from the menu?`}
+          message="It will no longer appear for billing. You can re-add it later."
+          showReason={false}
+          confirmLabel="Hide item"
+          cancelLabel="Keep"
+          onConfirm={() => doHide(hideRow)}
+          onClose={() => setHideRow(null)}
+        />
       )}
     </div>
   );

@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Restaurant table-based POS — dine-in, takeaway, and pre-orders",
   "productName": "Girr Kathiyawadi Tables",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JeelPansuriya/tables-pos.git"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -15,7 +19,7 @@
     "@supabase/supabase-js": "^2.45.4",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
-    "electron-pos-printer": "^1.4.1",
+    "electron-pos-printer": "^1.4.0",
     "electron-updater": "^6.8.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -61,6 +65,13 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "${productName} Setup ${version}.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "JeelPansuriya",
+        "repo": "tables-pos"
+      }
+    ]
   }
 }

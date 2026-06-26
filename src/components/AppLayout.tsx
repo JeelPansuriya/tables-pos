@@ -1,6 +1,8 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useStore } from '../store';
+import CloudSyncPill from './CloudSyncPill';
+import UpdatePill from './UpdatePill';
 
 const navItems = [
   { to: '/', label: 'Tables' },
@@ -51,6 +53,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           )}
         </nav>
         <div className="ml-auto flex items-center gap-2 text-sm">
+          <UpdatePill />
+          <CloudSyncPill />
           <span className="text-stone-500">
             {session?.username} · {session?.role}
           </span>

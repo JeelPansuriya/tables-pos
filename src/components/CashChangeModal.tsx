@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 type Props = {
   total: number;
@@ -10,25 +10,25 @@ const denoms = [500, 200, 100, 50, 20, 10];
 
 export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
   const [received, setReceived] = useState<number>(total);
+  const inputRef = useRef<HTMLInputElement>(null);
 
+  // Focus and select the amount on open so the cashier can type immediately.
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  // Only handle the two shortcuts globally. Typing goes through the focused
+  // input below — we must NOT preventDefault digits/Backspace app-wide, or it
+  // looks like the keyboard has stopped responding.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
         onCancel();
-        return;
-      }
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (received >= total) onConfirm(received, +(received - total).toFixed(2));
-        return;
-      }
-      if (/^[0-9]$/.test(e.key)) {
-        e.preventDefault();
-        setReceived((r) => Number(`${r}${e.key}`.replace(/^0+(?=\d)/, '')));
-      } else if (e.key === 'Backspace') {
-        e.preventDefault();
-        setReceived((r) => Math.floor(r / 10));
       }
     }
     window.addEventListener('keydown', onKey);
@@ -39,8 +39,11 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
   const ok = received >= total;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md p-5 space-y-4">
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+      onClick={onCancel}
+    >
+      <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-baseline justify-between">
           <h2 className="text-lg font-semibold">Cash payment</h2>
           <div className="text-sm text-stone-500">Esc to cancel · Ctrl+Enter to confirm</div>
@@ -53,12 +56,12 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
         <div>
           <label className="text-sm font-medium text-stone-700">Cash received</label>
           <input
+            ref={inputRef}
             className="input text-2xl font-semibold"
             type="number"
             min={0}
             value={received}
             onChange={(e) => setReceived(parseFloat(e.target.value) || 0)}
-            autoFocus
           />
         </div>
 
@@ -71,6 +74,17 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
               onClick={() => setReceived((r) => r + d)}
             >
               + ₹{d}
+            </button>
+          ))}
+          {[10, 50, 100].map((step) => (
+            <button
+              key={`up${step}`}
+              type="button"
+              className="btn-ghost border border-stone-300"
+              onClick={() => setReceived(Math.ceil(total / step) * step)}
+              title={`Round up to the next ₹${step}`}
+            >
+              ↑ ₹{step}
             </button>
           ))}
           <button

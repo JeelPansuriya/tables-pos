@@ -54,8 +54,9 @@ const api = {
         plate_weight: number;
         is_custom: boolean;
       }>,
-      customer?: { name?: string; mobile?: string; notes?: string }
-    ) => invoke('tables:saveOpen', { billId, items, customer }),
+      customer?: { name?: string; mobile?: string; notes?: string },
+      discount?: number
+    ) => invoke('tables:saveOpen', { billId, items, customer, discount }),
     closeAndPrint: (
       billId: number,
       payments: Array<{
@@ -63,8 +64,9 @@ const api = {
         mode: 'cash' | 'upi' | 'card' | 'other';
         cash_received?: number;
         change_given?: number;
-      }>
-    ) => invoke('tables:closeAndPrint', { billId, payments }),
+      }>,
+      print = true
+    ) => invoke('tables:closeAndPrint', { billId, payments, print }),
     cancel: (billId: number, reason: string) =>
       invoke('tables:cancel', { billId, reason }),
   },
@@ -88,6 +90,7 @@ const api = {
           change_given?: number;
         }>;
         customer?: { name?: string; mobile?: string; notes?: string };
+        discount?: number;
         print: boolean;
       }
     ) => invoke('bills:quickBill', payload),
@@ -95,6 +98,7 @@ const api = {
       invoke('bills:list', params),
     get: (id: number) => invoke('bills:get', id),
     reprint: (id: number) => invoke('bills:reprint', id),
+    void: (id: number, reason: string) => invoke('bills:void', { billId: id, reason }),
     testPrint: () => invoke('bills:testPrint'),
   },
   preorders: {
@@ -121,6 +125,39 @@ const api = {
       id: number,
       payment: { amount: number; mode: 'cash' | 'upi' | 'card' | 'other'; notes?: string }
     ) => invoke('preorders:addPayment', { id, payment }),
+    addItems: (
+      id: number,
+      items: Array<{
+        menu_item_id: number | null;
+        name: string;
+        qty: number;
+        unit_price: number;
+        is_custom: boolean;
+      }>
+    ) => invoke('preorders:addItems', { id, items }),
+    update: (
+      id: number,
+      fields: {
+        customer_name: string;
+        customer_mobile?: string;
+        for_date: string;
+        for_time?: string;
+        meal_type?: 'lunch' | 'dinner' | '';
+        notes?: string;
+      }
+    ) => invoke('preorders:update', { id, fields }),
+    setItems: (
+      id: number,
+      items: Array<{
+        menu_item_id: number | null;
+        name: string;
+        qty: number;
+        unit_price: number;
+        is_custom: boolean;
+      }>
+    ) => invoke('preorders:setItems', { id, items }),
+    setAdvance: (id: number, amount: number, mode: 'cash' | 'upi') =>
+      invoke('preorders:setAdvance', { id, amount, mode }),
     fulfill: (id: number, billId: number | null) =>
       invoke('preorders:fulfill', { id, billId }),
     cancel: (id: number, reason: string) =>
@@ -128,6 +165,7 @@ const api = {
     printReceipt: (id: number) => invoke('preorders:printReceipt', id),
   },
   daySummary: (date?: string) => invoke('day:summary', date),
+  daySummaryPrint: (date?: string) => invoke('day:printSummary', date),
   audit: {
     list: (params: { from?: string; to?: string; q?: string }) =>
       invoke('audit:list', params),
@@ -136,6 +174,17 @@ const api = {
     pushPending: () => invoke('cloud:pushPending'),
     pullSnapshot: () => invoke('cloud:pullSnapshot'),
     status: () => invoke('cloud:status'),
+  },
+  update: {
+    status: () => invoke('update:status'),
+    check: () => invoke('update:check'),
+    install: () => invoke('update:install'),
+    /** Subscribe to update lifecycle frames. Returns an unsubscribe fn. */
+    onEvent: (cb: (payload: any) => void) => {
+      const listener = (_e: unknown, payload: any) => cb(payload);
+      ipcRenderer.on('update:event', listener);
+      return () => ipcRenderer.removeListener('update:event', listener);
+    },
   },
 };
 

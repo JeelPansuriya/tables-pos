@@ -1,8 +1,9 @@
 import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
-import { autoUpdater } from 'electron-updater';
-import { getDb } from './db';
+import { autoCancelStaleOpenBills, backupDatabase, getDb } from './db';
 import { registerIpc } from './ipc';
+import { startCloudScheduler } from './sync';
+import { registerUpdater, checkForUpdatesOnLaunch } from './updater';
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 let mainWindow: BrowserWindow | null = null;
@@ -36,6 +37,9 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // In-app updates: forward autoUpdater events to this window + register IPC.
+  registerUpdater(() => mainWindow);
 }
 
 app.whenReady().then(() => {
@@ -44,12 +48,25 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
 
+  // End-of-day cleanup: cancel bills left open from previous days, now and
+  // hourly (so an always-on machine clears them after midnight too).
+  autoCancelStaleOpenBills(getDb());
+  setInterval(() => autoCancelStaleOpenBills(getDb()), 60 * 60 * 1000);
+
+  // Local safety backup of the SQLite file — at launch and once a day.
+  backupDatabase().catch((e) => console.error('DB backup failed:', e));
+  setInterval(() => backupDatabase().catch((e) => console.error('DB backup failed:', e)), 24 * 60 * 60 * 1000);
+
+  // Background cloud backup: pushes any pending bills/pre-orders on a heartbeat
+  // (and shortly after each mutation) when cloud sync is enabled in Settings.
+  startCloudScheduler();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 
   if (!isDev) {
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    checkForUpdatesOnLaunch();
   }
 });
 

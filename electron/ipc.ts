@@ -11,7 +11,14 @@ import {
   setSession,
   verifyPassword,
 } from './auth';
-import { printBill, printPreorderReceipt, printTestSlip, type SlipShop } from './printer';
+import {
+  printBill,
+  printDaySummary,
+  printPreorderReceipt,
+  printTestSlip,
+  type SlipShop,
+} from './printer';
+import { cloudStatus, scheduleSoon, syncPending } from './sync';
 
 type MealType = 'lunch' | 'dinner';
 type PaymentMode = 'cash' | 'upi' | 'card' | 'other';
@@ -39,15 +46,10 @@ function defaultMealForNow(db: Database): MealType {
 }
 
 function nextTokenForToday(db: Database): number {
+  // Token numbers restart each calendar day. We key off opened_at (the bill's
+  // creation time) rather than closed_at so a bill opened before midnight keeps
+  // the same day's sequence even if it closes after midnight.
   const row = db
-    .prepare(
-      `SELECT COALESCE(MAX(token_no), 0) AS m
-       FROM bills
-       WHERE date(created_at_local) = date('now', 'localtime')`
-    )
-    .get() as { m: number } | undefined;
-  // bills doesn't have created_at_local — fall back to opened_at via localtime
-  const row2 = db
     .prepare(
       `SELECT COALESCE(MAX(token_no), 0) AS m
        FROM bills
@@ -55,7 +57,7 @@ function nextTokenForToday(db: Database): number {
          AND token_no IS NOT NULL`
     )
     .get() as { m: number };
-  return (row2?.m ?? row?.m ?? 0) + 1;
+  return (row?.m ?? 0) + 1;
 }
 
 function nextOrderNo(db: Database): number {
@@ -135,13 +137,10 @@ export function registerIpc() {
   ipcMain.handle('auth:login', (_e, { username, password }) => {
     const s = login(db, username, password);
     if (!s) return { ok: false, error: 'Invalid credentials' };
-    logAudit(db, 'auth.login', { details: { username: s.username } });
     return { ok: true, session: s };
   });
 
   ipcMain.handle('auth:logout', () => {
-    const s = getSession();
-    if (s) logAudit(db, 'auth.logout', { details: { username: s.username } });
     setSession(null);
     return { ok: true };
   });
@@ -242,6 +241,9 @@ export function registerIpc() {
   ipcMain.handle('menu:upsert', (_e, item) => {
     requireSession();
     if (item.id) {
+      const prev = db
+        .prepare(`SELECT name, lunch_price, dinner_price FROM menu_items WHERE id=?`)
+        .get(item.id) as { name: string; lunch_price: number; dinner_price: number } | undefined;
       db.prepare(
         `UPDATE menu_items SET name=?, category=?, lunch_price=?, dinner_price=?,
                 plate_weight=?, shortcut_key=?, in_stock=?, active=?, sort_order=?,
@@ -259,7 +261,19 @@ export function registerIpc() {
         item.sort_order,
         item.id
       );
-      logAudit(db, 'menu.update', { entity_type: 'menu_item', entity_id: item.id, details: item });
+      // Audit only price changes — that's the change the owner cares to trace.
+      const priceChange: Record<string, [number, number]> = {};
+      if (prev && prev.lunch_price !== item.lunch_price)
+        priceChange.lunch = [prev.lunch_price, item.lunch_price];
+      if (prev && prev.dinner_price !== item.dinner_price)
+        priceChange.dinner = [prev.dinner_price, item.dinner_price];
+      if (Object.keys(priceChange).length > 0) {
+        logAudit(db, 'menu.priceChange', {
+          entity_type: 'menu_item',
+          entity_id: item.id,
+          details: { name: item.name, priceChange },
+        });
+      }
       return { ok: true, id: item.id };
     } else {
       const r = db
@@ -313,7 +327,8 @@ export function registerIpc() {
     const openBills = db
       .prepare(
         `SELECT id, table_id, token_no, total, opened_at, meal_type
-         FROM bills WHERE status='open' AND table_id IS NOT NULL`
+         FROM bills WHERE status='open' AND table_id IS NOT NULL
+         ORDER BY id`
       )
       .all() as Array<{
       id: number;
@@ -345,7 +360,6 @@ export function registerIpc() {
       )
       .run(tableId, meal, getSession()?.userId ?? null);
     const billId = Number(r.lastInsertRowid);
-    logAudit(db, 'bills.openTable', { entity_type: 'bill', entity_id: billId, details: { tableId, meal } });
     return { ok: true, bill: getBillForSlip(db, billId) };
   });
 
@@ -354,9 +368,12 @@ export function registerIpc() {
     return { ok: true, bill: getBillForSlip(db, billId) };
   });
 
-  ipcMain.handle('tables:saveOpen', (_e, { billId, items, customer }) => {
+  ipcMain.handle('tables:saveOpen', (_e, { billId, items, customer, discount }) => {
     requireSession();
     const tx = db.transaction(() => {
+      if (discount !== undefined) {
+        db.prepare(`UPDATE bills SET discount=? WHERE id=?`).run(Math.max(0, discount || 0), billId);
+      }
       db.prepare(`DELETE FROM bill_items WHERE bill_id=?`).run(billId);
       const insert = db.prepare(
         `INSERT INTO bill_items
@@ -390,15 +407,10 @@ export function registerIpc() {
       recomputeBillTotals(db, billId);
     });
     tx();
-    logAudit(db, 'bills.saveOpen', {
-      entity_type: 'bill',
-      entity_id: billId,
-      details: { itemCount: items.length },
-    });
     return { ok: true, bill: getBillForSlip(db, billId) };
   });
 
-  ipcMain.handle('tables:closeAndPrint', async (_e, { billId, payments }) => {
+  ipcMain.handle('tables:closeAndPrint', async (_e, { billId, payments, print = true }) => {
     requireSession();
     if (!Array.isArray(payments) || payments.length === 0)
       return { ok: false, error: 'No payments provided' };
@@ -448,17 +460,15 @@ export function registerIpc() {
     );
 
     let printError: string | null = null;
-    try {
-      await printBill(shopFromSettings(db), slip, printerName, copies);
-    } catch (e: any) {
-      printError = e?.message ?? String(e);
+    if (print) {
+      try {
+        await printBill(shopFromSettings(db), slip, printerName, copies);
+      } catch (e: any) {
+        printError = e?.message ?? String(e);
+      }
     }
 
-    logAudit(db, 'bills.close', {
-      entity_type: 'bill',
-      entity_id: billId,
-      details: { token: slip.token_no, total: slip.total, paymentModes: payments.map((p: any) => p.mode), printError },
-    });
+    scheduleSoon();
     return { ok: true, bill: slip, printError };
   });
 
@@ -472,11 +482,7 @@ export function registerIpc() {
       )
       .run(reason || null, billId);
     if (r.changes === 0) return { ok: false, error: 'Bill not open' };
-    logAudit(db, 'bills.cancel', {
-      entity_type: 'bill',
-      entity_id: billId,
-      details: { reason },
-    });
+    scheduleSoon();
     return { ok: true };
   });
 
@@ -522,6 +528,12 @@ export function registerIpc() {
           idx
         );
       });
+      if (payload.discount) {
+        db.prepare(`UPDATE bills SET discount=? WHERE id=?`).run(
+          Math.max(0, payload.discount),
+          billId
+        );
+      }
       recomputeBillTotals(db, billId);
 
       const totalsRow = db.prepare(`SELECT total FROM bills WHERE id=?`).get(billId) as { total: number };
@@ -565,11 +577,7 @@ export function registerIpc() {
         printerErr = e?.message ?? String(e);
       }
     }
-    logAudit(db, 'bills.quick', {
-      entity_type: 'bill',
-      entity_id: billId,
-      details: { type: payload.type, total: slip.total, printError: printerErr },
-    });
+    scheduleSoon();
     return { ok: true, bill: slip, printError: printerErr };
   });
 
@@ -625,7 +633,6 @@ export function registerIpc() {
     );
     try {
       await printBill(shopFromSettings(db), slip, printerName, copies);
-      logAudit(db, 'bills.reprint', { entity_type: 'bill', entity_id: id });
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: e?.message ?? String(e) };
@@ -643,6 +650,25 @@ export function registerIpc() {
     } catch (e: any) {
       return { ok: false, error: e?.message ?? String(e) };
     }
+  });
+
+  // Void a finalized (closed) bill: keep the row for the record but flip it to
+  // 'cancelled' with a reason. Day-summary / Bills queries key off status, so a
+  // voided bill drops out of revenue, plate counts, payment-mode totals, etc.
+  ipcMain.handle('bills:void', (_e, { billId, reason }) => {
+    requireSession();
+    if (!reason || !String(reason).trim())
+      return { ok: false, error: 'A reason is required to void a bill.' };
+    const r = db
+      .prepare(
+        `UPDATE bills SET status='cancelled', cancelled_at=datetime('now'),
+                cancel_reason=?, sync_status='pending'
+         WHERE id=? AND status='closed'`
+      )
+      .run(String(reason).trim(), billId);
+    if (r.changes === 0) return { ok: false, error: 'Only a closed bill can be voided.' };
+    scheduleSoon();
+    return { ok: true };
   });
 
   // -------- PRE-ORDERS --------
@@ -726,7 +752,7 @@ export function registerIpc() {
       recomputePreorderTotals(db, id);
     });
     tx();
-    logAudit(db, 'preorders.create', { entity_type: 'preorder', entity_id: id, details: payload });
+    scheduleSoon();
     return { ok: true, id };
   });
 
@@ -736,25 +762,153 @@ export function registerIpc() {
       `INSERT INTO preorder_payments (preorder_id, amount, mode, notes) VALUES (?, ?, ?, ?)`
     ).run(id, payment.amount, payment.mode, payment.notes ?? null);
     recomputePreorderTotals(db, id);
-    logAudit(db, 'preorders.addPayment', {
-      entity_type: 'preorder',
-      entity_id: id,
-      details: payment,
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // Add extra items to an existing (not yet fulfilled/cancelled) pre-order —
+  // e.g. extras requested on the fulfillment day. Raises the total/balance_due;
+  // the balance is then settled with a payment dated that day.
+  ipcMain.handle('preorders:addItems', (_e, { id, items }) => {
+    requireSession();
+    const pre = db.prepare(`SELECT status FROM preorders WHERE id=?`).get(id) as
+      | { status: string }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled' || pre.status === 'fulfilled')
+      return { ok: false, error: `Cannot add items to a ${pre.status} order` };
+    if (!Array.isArray(items) || items.length === 0)
+      return { ok: false, error: 'No items to add' };
+    const maxSort = (db
+      .prepare(`SELECT COALESCE(MAX(sort_order), -1) AS m FROM preorder_items WHERE preorder_id=?`)
+      .get(id) as { m: number }).m;
+    const ins = db.prepare(
+      `INSERT INTO preorder_items
+        (preorder_id, menu_item_id, name, qty, unit_price, total, is_custom, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const tx = db.transaction(() => {
+      items.forEach((it: any, idx: number) => {
+        const total = +(it.qty * it.unit_price).toFixed(2);
+        ins.run(
+          id,
+          it.menu_item_id ?? null,
+          it.name,
+          it.qty,
+          it.unit_price,
+          total,
+          it.is_custom ? 1 : 0,
+          maxSort + 1 + idx
+        );
+      });
+      recomputePreorderTotals(db, id);
     });
+    tx();
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // Replace a (not yet fulfilled/cancelled) pre-order's full item list — used by
+  // the Edit tab to add, change qty/price, or remove existing lines.
+  ipcMain.handle('preorders:setItems', (_e, { id, items }) => {
+    requireSession();
+    const pre = db.prepare(`SELECT status FROM preorders WHERE id=?`).get(id) as
+      | { status: string }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled' || pre.status === 'fulfilled')
+      return { ok: false, error: `Cannot edit a ${pre.status} order` };
+    if (!Array.isArray(items) || items.length === 0)
+      return { ok: false, error: 'A pre-order needs at least one item' };
+    const ins = db.prepare(
+      `INSERT INTO preorder_items
+        (preorder_id, menu_item_id, name, qty, unit_price, total, is_custom, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const tx = db.transaction(() => {
+      db.prepare(`DELETE FROM preorder_items WHERE preorder_id=?`).run(id);
+      items.forEach((it: any, idx: number) => {
+        const total = +(it.qty * it.unit_price).toFixed(2);
+        ins.run(id, it.menu_item_id ?? null, it.name, it.qty, it.unit_price, total, it.is_custom ? 1 : 0, idx);
+      });
+      recomputePreorderTotals(db, id);
+    });
+    tx();
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // Set/correct the advance on a not-yet-fulfilled order. Replaces the advance
+  // payment(s) with a single payment dated the order's creation day, so it stays
+  // counted on the placement day in reports.
+  ipcMain.handle('preorders:setAdvance', (_e, { id, amount, mode }) => {
+    requireSession();
+    const pre = db.prepare(`SELECT status, created_at FROM preorders WHERE id=?`).get(id) as
+      | { status: string; created_at: string }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled' || pre.status === 'fulfilled')
+      return { ok: false, error: `Cannot edit a ${pre.status} order` };
+    const amt = Math.max(0, amount || 0);
+    const m = mode === 'upi' ? 'upi' : 'cash';
+    const tx = db.transaction(() => {
+      db.prepare(`DELETE FROM preorder_payments WHERE preorder_id=?`).run(id);
+      if (amt > 0) {
+        db.prepare(
+          `INSERT INTO preorder_payments (preorder_id, amount, mode, received_at) VALUES (?, ?, ?, ?)`
+        ).run(id, amt, m, pre.created_at);
+      }
+      recomputePreorderTotals(db, id);
+    });
+    tx();
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // Edit a (not yet fulfilled/cancelled) pre-order's header details.
+  ipcMain.handle('preorders:update', (_e, { id, fields }) => {
+    requireSession();
+    const pre = db.prepare(`SELECT status FROM preorders WHERE id=?`).get(id) as
+      | { status: string }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled' || pre.status === 'fulfilled')
+      return { ok: false, error: `Cannot edit a ${pre.status} order` };
+    if (!fields?.customer_name || !fields?.for_date)
+      return { ok: false, error: 'Customer name and date are required' };
+    const meal = fields.meal_type === 'lunch' || fields.meal_type === 'dinner' ? fields.meal_type : null;
+    db.prepare(
+      `UPDATE preorders SET customer_name=?, customer_mobile=?, for_date=?, for_time=?,
+              meal_type=?, notes=?, sync_status='pending' WHERE id=?`
+    ).run(
+      fields.customer_name,
+      fields.customer_mobile || null,
+      fields.for_date,
+      fields.for_time || null,
+      meal,
+      fields.notes || null,
+      id
+    );
+    scheduleSoon();
     return { ok: true };
   });
 
   ipcMain.handle('preorders:fulfill', (_e, { id, billId }) => {
     requireSession();
+    const pre = db
+      .prepare(`SELECT status, balance_due FROM preorders WHERE id=?`)
+      .get(id) as { status: string; balance_due: number } | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled') return { ok: false, error: 'Order is cancelled' };
+    // A pre-order cannot be fulfilled while any amount is still due — the
+    // balance must be collected at fulfillment.
+    if (pre.balance_due > 0.001)
+      return { ok: false, error: 'Collect the full balance before marking fulfilled.' };
     db.prepare(
       `UPDATE preorders SET status='fulfilled', fulfilled_at=datetime('now'),
               fulfilled_bill_id=?, sync_status='pending' WHERE id=?`
     ).run(billId ?? null, id);
-    logAudit(db, 'preorders.fulfill', {
-      entity_type: 'preorder',
-      entity_id: id,
-      details: { billId },
-    });
+    scheduleSoon();
     return { ok: true };
   });
 
@@ -764,11 +918,7 @@ export function registerIpc() {
       `UPDATE preorders SET status='cancelled', cancelled_at=datetime('now'),
               cancel_reason=?, sync_status='pending' WHERE id=?`
     ).run(reason || null, id);
-    logAudit(db, 'preorders.cancel', {
-      entity_type: 'preorder',
-      entity_id: id,
-      details: { reason },
-    });
+    scheduleSoon();
     return { ok: true };
   });
 
@@ -785,7 +935,6 @@ export function registerIpc() {
         | undefined)?.value) || '';
     try {
       await printPreorderReceipt(shopFromSettings(db), { ...p, items }, printerName);
-      logAudit(db, 'preorders.printReceipt', { entity_type: 'preorder', entity_id: id });
       return { ok: true };
     } catch (e: any) {
       return { ok: false, error: e?.message ?? String(e) };
@@ -793,9 +942,7 @@ export function registerIpc() {
   });
 
   // -------- DAY SUMMARY --------
-  ipcMain.handle('day:summary', (_e, date?: string) => {
-    requireSession();
-    const d = date || new Date().toISOString().slice(0, 10);
+  function computeDaySummary(d: string) {
     const totals = db
       .prepare(
         `SELECT COUNT(*) AS bills,
@@ -804,15 +951,21 @@ export function registerIpc() {
          FROM bills WHERE status='closed' AND date(opened_at,'localtime') = ?`
       )
       .get(d) as { bills: number; revenue: number; plates: number };
+    // Money collected today by mode = closed-bill payments + pre-order advances
+    // taken today, so it reconciles with the cash/UPI in hand at end of day.
     const byMode = db
       .prepare(
-        `SELECT bp.mode, COALESCE(SUM(bp.amount), 0) AS amt
-         FROM bill_payments bp
-         JOIN bills b ON b.id = bp.bill_id
-         WHERE b.status='closed' AND date(b.opened_at,'localtime') = ?
-         GROUP BY bp.mode`
+        `SELECT mode, COALESCE(SUM(amt), 0) AS amt FROM (
+           SELECT bp.mode AS mode, bp.amount AS amt
+             FROM bill_payments bp JOIN bills b ON b.id = bp.bill_id
+             WHERE b.status='closed' AND date(b.opened_at,'localtime') = ?
+           UNION ALL
+           SELECT pp.mode AS mode, pp.amount AS amt
+             FROM preorder_payments pp
+             WHERE date(pp.received_at,'localtime') = ?
+         ) GROUP BY mode`
       )
-      .all(d) as Array<{ mode: string; amt: number }>;
+      .all(d, d) as Array<{ mode: string; amt: number }>;
     const byMeal = db
       .prepare(
         `SELECT meal_type, COUNT(*) AS bills, COALESCE(SUM(total),0) AS revenue
@@ -829,7 +982,66 @@ export function registerIpc() {
          GROUP BY bi.name ORDER BY qty DESC`
       )
       .all(d) as Array<{ name: string; qty: number; revenue: number }>;
-    return { ok: true, date: d, totals, byMode, byMeal, items };
+    // All pre-order money collected this day (advance on the placement day,
+    // balance + extras on the fulfillment day) — each payment counts on its own
+    // received_at date.
+    const preorderPaid = (db
+      .prepare(
+        `SELECT COALESCE(SUM(amount), 0) AS amt FROM preorder_payments
+         WHERE date(received_at,'localtime') = ?`
+      )
+      .get(d) as { amt: number }).amt;
+    // Voided bills = once-closed bills (they carry a token) later cancelled.
+    const cancelled = db
+      .prepare(
+        `SELECT id, token_no, total, cancel_reason, cancelled_at
+         FROM bills
+         WHERE status='cancelled' AND token_no IS NOT NULL
+           AND date(opened_at,'localtime') = ?
+         ORDER BY cancelled_at DESC`
+      )
+      .all(d) as Array<{
+      id: number;
+      token_no: number | null;
+      total: number;
+      cancel_reason: string | null;
+      cancelled_at: string | null;
+    }>;
+    const cancelledTotal = cancelled.reduce((s, b) => s + b.total, 0);
+    const totalCollected = totals.revenue + preorderPaid;
+    return {
+      date: d,
+      totals,
+      byMode,
+      byMeal,
+      items,
+      preorderPaid,
+      totalCollected,
+      cancelled,
+      cancelledTotal,
+    };
+  }
+
+  ipcMain.handle('day:summary', (_e, date?: string) => {
+    requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    return { ok: true, ...computeDaySummary(d) };
+  });
+
+  ipcMain.handle('day:printSummary', async (_e, date?: string) => {
+    requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const summary = computeDaySummary(d);
+    const printerName =
+      ((db.prepare(`SELECT value FROM settings WHERE key='printer_name'`).get() as
+        | { value?: string }
+        | undefined)?.value) || '';
+    try {
+      await printDaySummary(shopFromSettings(db), summary, printerName);
+      return { ok: true };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
   });
 
   // -------- AUDIT --------
@@ -850,28 +1062,31 @@ export function registerIpc() {
     return { ok: true, entries: rows };
   });
 
-  // -------- CLOUD (stubs — phase 2) --------
+  // -------- CLOUD (phase 2 — push-only backup to Supabase) --------
   ipcMain.handle('cloud:status', () => {
-    const enabled =
-      (db.prepare(`SELECT value FROM settings WHERE key='cloud_sync_enabled'`).get() as
-        | { value?: string }
-        | undefined)?.value === '1';
-    const pending = db
-      .prepare(`SELECT COUNT(*) AS c FROM bills WHERE sync_status='pending'`)
-      .get() as { c: number };
-    const pendingPre = db
-      .prepare(`SELECT COUNT(*) AS c FROM preorders WHERE sync_status='pending'`)
-      .get() as { c: number };
-    return { ok: true, enabled, pending: pending.c + pendingPre.c };
+    return { ok: true, ...cloudStatus() };
   });
 
-  ipcMain.handle('cloud:pushPending', () => {
+  ipcMain.handle('cloud:pushPending', async () => {
     requireAdmin();
-    return { ok: false, error: 'Cloud sync not yet enabled. Configure Supabase URL/key in Settings (phase 2).' };
+    const cfg = cloudStatus();
+    if (!cfg.configured)
+      return { ok: false, error: 'Supabase URL/key not set. Add them in Settings, then enable cloud sync.' };
+    const r = await syncPending();
+    if (!r.ok) {
+      logAudit(db, 'cloud.pushFailed', { details: { reason: r.reason } });
+      return { ok: false, error: r.reason || 'Sync failed' };
+    }
+    return { ok: true, syncedBills: r.syncedBills, syncedPreorders: r.syncedPreorders };
   });
 
+  // Pull/restore from cloud is intentionally not part of this build — local
+  // SQLite is the source of truth and the backup is push-only.
   ipcMain.handle('cloud:pullSnapshot', () => {
     requireAdmin();
-    return { ok: false, error: 'Cloud sync not yet enabled. Configure Supabase URL/key in Settings (phase 2).' };
+    return {
+      ok: false,
+      error: 'Pull/restore is not available in this build — cloud sync is a one-way backup.',
+    };
   });
 }

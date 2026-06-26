@@ -12,10 +12,15 @@ export default function QuickBillPage() {
     (settings.default_meal_type as MealType) || 'dinner'
   );
   const [type, setType] = useState<'takeaway' | 'dine_in'>('takeaway');
+  const [discount, setDiscount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   const subtotal = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
+  const maxPct = parseFloat(settings.discount_max_pct || '0') || 0;
+  const maxDiscount = +((subtotal * maxPct) / 100).toFixed(2);
+  const appliedDiscount = Math.min(Math.max(0, discount), maxDiscount);
+  const total = Math.max(0, +(subtotal - appliedDiscount).toFixed(2));
 
   async function settle(payments: PaymentEntry[], print: boolean) {
     if (items.length === 0) return;
@@ -26,6 +31,7 @@ export default function QuickBillPage() {
       meal_type: mealType,
       items,
       payments,
+      discount: appliedDiscount,
       print,
     });
     setBusy(false);
@@ -34,11 +40,10 @@ export default function QuickBillPage() {
       return;
     }
     setMsg(
-      `Bill #${r.bill.id} (token ${r.bill.token_no}) saved.${
-        r.printError ? ' Print failed: ' + r.printError : ''
-      }`
+      `Token ${r.bill.token_no} saved.${r.printError ? ' Print failed: ' + r.printError : ''}`
     );
     setItems([]);
+    setDiscount(0);
   }
 
   return (
@@ -70,17 +75,36 @@ export default function QuickBillPage() {
             onChange={setItems}
           />
         </div>
-        <PaymentBar
-          total={subtotal}
-          disabled={busy || items.length === 0}
-          primaryLabel="Print & Close"
-          onSettle={(p) => settle(p, true)}
-          secondaryAction={{
-            label: 'Save (no print)',
-            onClick: () => settle([{ amount: subtotal, mode: 'cash' }], false),
-            disabled: busy || items.length === 0,
-          }}
-        />
+        <div className="flex flex-col gap-3">
+          {maxPct > 0 && (
+            <div className="card space-y-1 p-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-stone-600">Subtotal</span>
+                <span>₹{subtotal.toFixed(2)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-stone-600">Discount (max ₹{maxDiscount.toFixed(0)})</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={maxDiscount}
+                  className="w-24 rounded border border-stone-300 px-2 py-0.5 text-right"
+                  value={discount || ''}
+                  onChange={(e) =>
+                    setDiscount(Math.min(maxDiscount, Math.max(0, parseFloat(e.target.value) || 0)))
+                  }
+                />
+              </div>
+            </div>
+          )}
+          <PaymentBar
+            total={total}
+            disabled={busy || items.length === 0}
+            primaryLabel="Save & Print"
+            secondaryLabel="Save"
+            onSettle={settle}
+          />
+        </div>
       </div>
     </div>
   );

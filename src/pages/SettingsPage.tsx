@@ -10,16 +10,16 @@ const fields: Array<{ key: string; label: string; type?: string; help?: string }
   { key: 'default_meal_type', label: 'Default meal (lunch / dinner)' },
   { key: 'lunch_until_hour', label: 'Hour at which dinner starts (24h)', type: 'number' },
   { key: 'printer_name', label: 'Printer name (exact)' },
-  { key: 'printer_copies', label: 'Print copies (1 or 2)', type: 'number' },
+  { key: 'printer_copies', label: 'Customer copies to print', type: 'number', help: 'How many identical customer slips per bill (default 1). Manager copy is no longer printed.' },
   { key: 'discount_max_pct', label: 'Max discount % (0–100)', type: 'number' },
-  { key: 'supabase_url', label: 'Supabase URL (phase 2)' },
-  { key: 'supabase_anon_key', label: 'Supabase anon key (phase 2)' },
+  { key: 'supabase_url', label: 'Supabase URL', help: 'e.g. https://xxxx.supabase.co' },
+  { key: 'supabase_anon_key', label: 'Supabase anon key' },
   { key: 'supabase_table_prefix', label: 'Cloud table prefix', help: 'Defaults to "v2_" — keeps this app isolated from the v1 dataset.' },
-  { key: 'cloud_sync_enabled', label: 'Cloud sync enabled (1/0)' },
+  { key: 'cloud_sync_enabled', label: 'Cloud sync enabled (1/0)', help: 'Set to 1 to push closed bills & pre-orders to Supabase in the background.' },
 ];
 
 export default function SettingsPage() {
-  const { settings, refreshSettings, session } = useStore();
+  const { settings, refreshSettings, session, cloud, syncing, refreshCloud, syncNow } = useStore();
   const [draft, setDraft] = useState<Record<string, string>>({ ...settings });
   const [users, setUsers] = useState<any[]>([]);
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'manager' as 'manager' | 'admin' });
@@ -45,7 +45,13 @@ export default function SettingsPage() {
     if (r?.ok) {
       setMsg('Saved.');
       await refreshSettings();
+      await refreshCloud();
     } else setMsg(r?.error || 'Save failed');
+  }
+
+  async function doSync() {
+    const r = await syncNow();
+    setMsg(r.ok ? 'Cloud sync complete.' : `Sync failed: ${r.error}`);
   }
 
   async function changePw() {
@@ -64,7 +70,7 @@ export default function SettingsPage() {
     if (r?.ok) {
       setNewUser({ username: '', password: '', role: 'manager' });
       await refreshUsers();
-    } else alert(r?.error || 'Failed');
+    } else setMsg(r?.error || 'Failed');
   }
 
   async function testPrint() {
@@ -125,6 +131,44 @@ export default function SettingsPage() {
           Update password
         </button>
       </div>
+
+      {session?.role === 'admin' && (
+        <div className="card p-4 space-y-3">
+          <h2 className="text-sm font-semibold">Cloud backup</h2>
+          {!cloud?.configured ? (
+            <p className="text-sm text-stone-600">
+              Add your Supabase URL and anon key above, set <code>Cloud sync enabled</code> to{' '}
+              <code>1</code>, and Save. Closed bills and pre-orders then back up automatically.
+            </p>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+                <span>
+                  Status:{' '}
+                  <strong className={cloud.enabled ? 'text-emerald-700' : 'text-stone-500'}>
+                    {cloud.enabled ? 'enabled' : 'configured but disabled'}
+                  </strong>
+                </span>
+                <span>
+                  Pending: <strong>{cloud.pending}</strong>
+                </span>
+                <span className="text-stone-500">
+                  Last sync:{' '}
+                  {cloud.lastSyncAt ? new Date(cloud.lastSyncAt).toLocaleString() : 'never'}
+                </span>
+              </div>
+              {cloud.lastError && (
+                <div className="rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  Last error: {cloud.lastError}
+                </div>
+              )}
+              <button className="btn-primary w-fit" onClick={doSync} disabled={syncing || !cloud.enabled}>
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {session?.role === 'admin' && (
         <div className="card p-4 space-y-3">

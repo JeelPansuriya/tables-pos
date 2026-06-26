@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { app } from 'electron';
 import Database from 'better-sqlite3';
+import bcrypt from 'bcryptjs';
 
 let dbInstance: Database.Database | null = null;
 
@@ -212,18 +213,81 @@ function seedDefaults(db: Database.Database) {
   for (const [k, v] of defaults) stmt.run(k, v);
 }
 
+// An earlier build seeded this placeholder hash with a (false) comment claiming
+// it was bcrypt('owner'). It does NOT match "owner", so the documented bootstrap
+// login failed. We detect it and repair existing databases below.
+const LEGACY_SENTINEL_HASH = '$2a$10$NnrnP3UM5tbg9YcptVyNK.8TDU2cHnmxxhSkOtL.hKdNNIULZF1pi';
+
 function seedAdminUser(db: Database.Database) {
-  const has = (db.prepare(`SELECT COUNT(*) AS c FROM users`).get() as { c: number }).c > 0;
-  if (has) return;
   // Bootstrap: a single admin user "owner" / "owner". The first thing the
-  // user must do on a fresh install is log in and change the password.
-  // We use bcryptjs lazily here to keep db.ts decoupled — actual hashing
-  // happens in auth.ts which seeds via this same path. To avoid a circular
-  // require, seed a sentinel row that auth.ts will rewrite on first run.
-  const sentinelHash = '$2a$10$NnrnP3UM5tbg9YcptVyNK.8TDU2cHnmxxhSkOtL.hKdNNIULZF1pi'; // bcrypt('owner')
-  db.prepare(
-    `INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')`
-  ).run('owner', sentinelHash);
+  // operator should do on a fresh install is log in and change the password
+  // (Settings → Change my password).
+  const has = (db.prepare(`SELECT COUNT(*) AS c FROM users`).get() as { c: number }).c > 0;
+  if (!has) {
+    db.prepare(
+      `INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')`
+    ).run('owner', bcrypt.hashSync('owner', 10));
+    return;
+  }
+  // Repair databases created by the earlier build: if the owner account still
+  // carries the broken placeholder hash, replace it with a real bcrypt('owner')
+  // so owner/owner works as documented. Accounts with a changed password are
+  // left untouched.
+  const owner = db
+    .prepare(`SELECT id, password_hash FROM users WHERE username = 'owner'`)
+    .get() as { id: number; password_hash: string } | undefined;
+  if (owner && owner.password_hash === LEGACY_SENTINEL_HASH) {
+    db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(
+      bcrypt.hashSync('owner', 10),
+      owner.id
+    );
+  }
+}
+
+/**
+ * End-of-day cleanup: any bill still 'open' from a previous calendar day is
+ * auto-cancelled (they were never settled). Runs at startup and hourly, so a
+ * day's leftover open bills don't linger or distort the next day's tables.
+ * These have no token, so they don't appear as voided sales in reports.
+ */
+export function autoCancelStaleOpenBills(db: Database.Database): number {
+  const r = db
+    .prepare(
+      `UPDATE bills
+         SET status='cancelled', cancelled_at=datetime('now'),
+             cancel_reason='Auto-cancelled (left open at end of day)',
+             sync_status='pending'
+       WHERE status='open' AND date(opened_at,'localtime') < date('now','localtime')`
+    )
+    .run();
+  return r.changes;
+}
+
+/**
+ * Copy the live database to userData/backups/tables-pos-YYYY-MM-DD.sqlite using
+ * SQLite's online backup (safe while the app is running). One file per day;
+ * keeps the most recent `keep` days. Runs at launch and daily from main.ts so
+ * there's always a recent local copy even when cloud sync is off.
+ */
+export async function backupDatabase(keep = 14): Promise<void> {
+  const dir = path.join(app.getPath('userData'), 'backups');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate()
+  ).padStart(2, '0')}`;
+  await getDb().backup(path.join(dir, `tables-pos-${stamp}.sqlite`));
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => /^tables-pos-.*\.sqlite$/.test(f))
+    .sort();
+  for (const f of files.slice(0, Math.max(0, files.length - keep))) {
+    try {
+      fs.unlinkSync(path.join(dir, f));
+    } catch {
+      // ignore prune failures
+    }
+  }
 }
 
 // helper exported so IPC layer can use it for ad-hoc migrations

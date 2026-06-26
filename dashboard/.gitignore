@@ -1,12 +1,6 @@
 node_modules
 dist
-dist-electron
-release
-.vite
-.DS_Store
-*.log
 .env
 .env.local
-.cache
 *.tsbuildinfo
 .vercel

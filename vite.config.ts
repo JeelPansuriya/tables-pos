@@ -2,6 +2,20 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron/simple';
 
+// Native / dynamic-require modules used by the main process. These MUST stay
+// external: bundling better-sqlite3 makes Rollup try to inline its .node binary
+// (which it can't resolve at runtime), and electron-pos-printer/electron-updater
+// rely on require() + native bits too. They're loaded from node_modules at
+// runtime — electron-builder packages production deps automatically.
+const mainExternals = [
+  'better-sqlite3',
+  'bindings',
+  'electron-pos-printer',
+  'electron-updater',
+  'bcryptjs',
+  '@supabase/supabase-js',
+];
+
 // Electron + React app. Vite handles renderer (src/), the electron plugin
 // builds main + preload from electron/ into dist-electron/.
 export default defineConfig({
@@ -10,6 +24,13 @@ export default defineConfig({
     electron({
       main: {
         entry: 'electron/main.ts',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: mainExternals,
+            },
+          },
+        },
       },
       preload: {
         input: 'electron/preload.ts',
