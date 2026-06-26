@@ -41,7 +41,6 @@ export default function LoginPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <p className="text-xs text-stone-500">First-run default: <code>owner</code> / <code>owner</code> — change immediately in Settings.</p>
         </div>
         {error && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
         <button type="submit" className="btn-primary w-full" disabled={busy}>
