@@ -57,35 +57,40 @@ function pad(left: string, right: string, width = 32): string {
   return left + ' '.repeat(space) + right;
 }
 
+// Thermal heads print faint at normal weight, so every line is bold by default
+// and emphasized lines go heavier still (900). A crisp fixed-width font keeps the
+// padded columns aligned while printing darker than the default `monospace`.
+const FONT = "'Consolas','Roboto Mono','Courier New',monospace";
+
+const center = (text: string, bold = false, size: 'lg' | 'md' | 'sm' = 'md') => ({
+  type: 'text',
+  value: text,
+  style: {
+    'text-align': 'center',
+    'font-weight': bold ? '900' : 'bold',
+    'font-size': size === 'lg' ? '20px' : size === 'md' ? '14px' : '11px',
+    'font-family': FONT,
+  },
+});
+const left = (text: string, bold = false) => ({
+  type: 'text',
+  value: text,
+  style: {
+    'text-align': 'left',
+    'font-weight': bold ? '900' : 'bold',
+    'font-size': '12px',
+    'font-family': FONT,
+    'white-space': 'pre',
+  },
+});
+const divider = () => ({
+  type: 'text',
+  value: '--------------------------------',
+  style: { 'font-family': FONT, 'font-size': '12px', 'font-weight': 'bold' },
+});
+
 function buildBillData(shop: SlipShop, bill: SlipBill, copyLabel: string): any[] {
   const lines: any[] = [];
-  const center = (text: string, bold = false, size: 'lg' | 'md' | 'sm' = 'md') => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'center',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': size === 'lg' ? '20px' : size === 'md' ? '14px' : '11px',
-      'font-family': 'monospace',
-    },
-  });
-  const left = (text: string, bold = false) => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'left',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': '12px',
-      'font-family': 'monospace',
-      'white-space': 'pre',
-    },
-  });
-  const divider = () => ({
-    type: 'text',
-    value: '--------------------------------',
-    style: { 'font-family': 'monospace', 'font-size': '12px' },
-  });
-
   lines.push(center(shop.name, true, 'lg'));
   if (shop.address) lines.push(center(shop.address, false, 'sm'));
   if (shop.phone) lines.push(center(shop.phone, false, 'sm'));
@@ -182,33 +187,6 @@ export async function printPreorderReceipt(
   printerName: string
 ): Promise<void> {
   const lines: any[] = [];
-  const center = (text: string, bold = false, size: 'lg' | 'md' | 'sm' = 'md') => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'center',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': size === 'lg' ? '20px' : size === 'md' ? '14px' : '11px',
-      'font-family': 'monospace',
-    },
-  });
-  const left = (text: string, bold = false) => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'left',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': '12px',
-      'font-family': 'monospace',
-      'white-space': 'pre',
-    },
-  });
-  const divider = () => ({
-    type: 'text',
-    value: '--------------------------------',
-    style: { 'font-family': 'monospace', 'font-size': '12px' },
-  });
-
   lines.push(center(shop.name, true, 'lg'));
   if (shop.address) lines.push(center(shop.address, false, 'sm'));
   if (shop.phone) lines.push(center(shop.phone, false, 'sm'));
@@ -265,33 +243,6 @@ export async function printDaySummary(
   s: SlipDaySummary,
   printerName: string
 ): Promise<void> {
-  const center = (text: string, bold = false, size: 'lg' | 'md' | 'sm' = 'md') => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'center',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': size === 'lg' ? '20px' : size === 'md' ? '14px' : '11px',
-      'font-family': 'monospace',
-    },
-  });
-  const left = (text: string, bold = false) => ({
-    type: 'text',
-    value: text,
-    style: {
-      'text-align': 'left',
-      'font-weight': bold ? 'bold' : 'normal',
-      'font-size': '12px',
-      'font-family': 'monospace',
-      'white-space': 'pre',
-    },
-  });
-  const divider = () => ({
-    type: 'text',
-    value: '--------------------------------',
-    style: { 'font-family': 'monospace', 'font-size': '12px' },
-  });
-
   const lines: any[] = [];
   lines.push(center(shop.name, true, 'lg'));
   lines.push(center('DAY SUMMARY', true, 'sm'));
@@ -339,14 +290,14 @@ export async function printTestSlip(printerName: string): Promise<void> {
     {
       type: 'text',
       value: 'TEST PRINT',
-      style: { 'text-align': 'center', 'font-weight': 'bold', 'font-size': '20px', 'font-family': 'monospace' },
+      style: { 'text-align': 'center', 'font-weight': '900', 'font-size': '20px', 'font-family': FONT },
     },
     {
       type: 'text',
       value: 'If you can read this, the printer is connected.',
-      style: { 'text-align': 'center', 'font-size': '12px', 'font-family': 'monospace' },
+      style: { 'text-align': 'center', 'font-weight': 'bold', 'font-size': '12px', 'font-family': FONT },
     },
-    { type: 'text', value: '\n\n\n', style: { 'font-family': 'monospace' } },
+    { type: 'text', value: '\n\n\n', style: { 'font-family': FONT } },
   ];
   const opts: any = {
     preview: false,
