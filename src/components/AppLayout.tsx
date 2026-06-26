@@ -22,7 +22,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full flex-col">
       <header className="flex items-center gap-4 border-b border-stone-200 bg-white px-4 py-2 shadow-sm">
-        <div className="font-bold text-brand-700">{restaurantName} <span className="text-stone-400 font-normal">· Tables</span></div>
+        <div className="font-bold text-brand-700">{restaurantName}</div>
         <nav className="flex items-center gap-1 overflow-x-auto">
           {navItems.map((n) => (
             <NavLink

@@ -16,9 +16,12 @@ type Row = {
   sort_order: number;
 };
 
+// Predefined menu categories — keeps the menu organised and consistent.
+const CATEGORIES = ['Dish', 'Sweets/Sides', 'Extras'];
+
 const blank: Row = {
   name: '',
-  category: '',
+  category: 'Dish',
   lunch_price: 0,
   dinner_price: 0,
   plate_weight: 1,
@@ -153,11 +156,17 @@ export default function MenuPage() {
               </div>
               <div>
                 <label className="text-xs text-stone-600">Category</label>
-                <input
+                <select
                   className="input"
-                  value={editing.category ?? ''}
+                  value={editing.category ?? 'Dish'}
                   onChange={(e) => setEditing({ ...editing, category: e.target.value })}
-                />
+                >
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="text-xs text-stone-600">Shortcut key (1–2 letters)</label>
