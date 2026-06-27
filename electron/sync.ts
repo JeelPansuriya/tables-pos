@@ -233,6 +233,158 @@ async function pushCashCounts(db: Database, cfg: CloudConfig): Promise<number> {
   return rows.length;
 }
 
+/** GET every row from a cloud table, paging past PostgREST's row cap. */
+async function fetchAll(cfg: CloudConfig, table: string): Promise<any[]> {
+  const out: any[] = [];
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const res = await fetch(
+      `${cfg.baseUrl}/rest/v1/${cfg.prefix}${table}?select=*&limit=${pageSize}&offset=${offset}`,
+      { headers: { apikey: cfg.key, Authorization: `Bearer ${cfg.key}` } }
+    );
+    if (!res.ok)
+      throw new Error(`${table}: ${res.status} ${(await res.text().catch(() => '')).slice(0, 160)}`);
+    const rows = (await res.json()) as any[];
+    out.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+  return out;
+}
+
+export type PullResult = { ok: boolean; error?: string; counts?: Record<string, number> };
+
+/**
+ * Pull every backed-up table from the cloud and OVERWRITE local transactional
+ * data (bills, pre-orders, cash counts + children). Menu, settings, tables and
+ * users aren't cloud-backed, so they're left untouched. Local open/unsynced
+ * bills aren't in the cloud and will be removed — the caller backs up first.
+ */
+export async function pullAndOverride(): Promise<PullResult> {
+  const cfg = resolveCloud();
+  if (!cfg) return { ok: false, error: 'Supabase URL/key not set.' };
+  const db = getDb();
+  try {
+    const [bills, billItems, billPayments, preorders, preorderItems, preorderPayments, cashCounts] =
+      await Promise.all([
+        fetchAll(cfg, 'bills'),
+        fetchAll(cfg, 'bill_items'),
+        fetchAll(cfg, 'bill_payments'),
+        fetchAll(cfg, 'preorders'),
+        fetchAll(cfg, 'preorder_items'),
+        fetchAll(cfg, 'preorder_payments'),
+        fetchAll(cfg, 'cash_counts'),
+      ]);
+
+    const tableByLabel = new Map(
+      (db.prepare(`SELECT id, label FROM tables`).all() as Array<{ id: number; label: string }>).map(
+        (t) => [t.label, t.id]
+      )
+    );
+    const menuIds = new Set(
+      (db.prepare(`SELECT id FROM menu_items`).all() as Array<{ id: number }>).map((m) => m.id)
+    );
+    const billIds = new Set(bills.map((b) => b.id));
+    const preIds = new Set(preorders.map((p) => p.id));
+    const menuId = (v: any) => (v != null && menuIds.has(v) ? v : null);
+
+    const tx = db.transaction(() => {
+      db.exec(`DELETE FROM bill_payments; DELETE FROM bill_items;
+               DELETE FROM preorder_payments; DELETE FROM preorder_items;
+               DELETE FROM preorders; DELETE FROM bills; DELETE FROM cash_counts;`);
+
+      const insBill = db.prepare(
+        `INSERT INTO bills (id, token_no, type, status, table_id, meal_type, customer_name,
+           customer_mobile, notes, subtotal, discount, total, plates, opened_at, closed_at,
+           cancelled_at, cancel_reason, sync_status)
+         VALUES (@id,@token_no,@type,@status,@table_id,@meal_type,@customer_name,@customer_mobile,
+           @notes,@subtotal,@discount,@total,@plates,@opened_at,@closed_at,@cancelled_at,@cancel_reason,'synced')`
+      );
+      for (const b of bills)
+        insBill.run({
+          id: b.id, token_no: b.token_no ?? null, type: b.type ?? 'dine_in', status: b.status ?? 'closed',
+          table_id: tableByLabel.get(b.table_label) ?? null, meal_type: b.meal_type ?? 'dinner',
+          customer_name: b.customer_name ?? null, customer_mobile: b.customer_mobile ?? null,
+          notes: b.notes ?? null, subtotal: b.subtotal ?? 0, discount: b.discount ?? 0,
+          total: b.total ?? 0, plates: b.plates ?? 0, opened_at: b.opened_at ?? null,
+          closed_at: b.closed_at ?? null, cancelled_at: b.cancelled_at ?? null, cancel_reason: b.cancel_reason ?? null,
+        });
+
+      const insBillItem = db.prepare(
+        `INSERT INTO bill_items (id, bill_id, menu_item_id, name, qty, unit_price, plate_weight, total, is_custom, sort_order)
+         VALUES (@id,@bill_id,@menu_item_id,@name,@qty,@unit_price,@plate_weight,@total,@is_custom,@sort_order)`
+      );
+      for (const it of billItems)
+        if (billIds.has(it.bill_id))
+          insBillItem.run({
+            id: it.id, bill_id: it.bill_id, menu_item_id: menuId(it.menu_item_id), name: it.name,
+            qty: it.qty, unit_price: it.unit_price, plate_weight: it.plate_weight ?? 1,
+            total: it.total, is_custom: it.is_custom ?? 0, sort_order: it.sort_order ?? 0,
+          });
+
+      const insBillPay = db.prepare(
+        `INSERT INTO bill_payments (id, bill_id, amount, mode, received_at, cash_received, change_given, notes)
+         VALUES (@id,@bill_id,@amount,@mode,@received_at,@cash_received,@change_given,@notes)`
+      );
+      for (const p of billPayments)
+        if (billIds.has(p.bill_id))
+          insBillPay.run({
+            id: p.id, bill_id: p.bill_id, amount: p.amount, mode: p.mode, received_at: p.received_at ?? null,
+            cash_received: p.cash_received ?? null, change_given: p.change_given ?? null, notes: p.notes ?? null,
+          });
+
+      const insPre = db.prepare(
+        `INSERT INTO preorders (id, order_no, customer_name, customer_mobile, for_date, for_time, meal_type,
+           notes, total, advance_paid, balance_due, status, fulfilled_bill_id, created_at, fulfilled_at,
+           cancelled_at, cancel_reason, sync_status)
+         VALUES (@id,@order_no,@customer_name,@customer_mobile,@for_date,@for_time,@meal_type,@notes,@total,
+           @advance_paid,@balance_due,@status,@fulfilled_bill_id,@created_at,@fulfilled_at,@cancelled_at,@cancel_reason,'synced')`
+      );
+      for (const p of preorders)
+        insPre.run({
+          id: p.id, order_no: p.order_no ?? null, customer_name: p.customer_name, customer_mobile: p.customer_mobile ?? null,
+          for_date: p.for_date, for_time: p.for_time ?? null, meal_type: p.meal_type ?? null, notes: p.notes ?? null,
+          total: p.total ?? 0, advance_paid: p.advance_paid ?? 0, balance_due: p.balance_due ?? 0,
+          status: p.status ?? 'pending', fulfilled_bill_id: billIds.has(p.fulfilled_bill_id) ? p.fulfilled_bill_id : null,
+          created_at: p.created_at ?? null, fulfilled_at: p.fulfilled_at ?? null, cancelled_at: p.cancelled_at ?? null,
+          cancel_reason: p.cancel_reason ?? null,
+        });
+
+      const insPreItem = db.prepare(
+        `INSERT INTO preorder_items (id, preorder_id, menu_item_id, name, qty, unit_price, total, is_custom, sort_order)
+         VALUES (@id,@preorder_id,@menu_item_id,@name,@qty,@unit_price,@total,@is_custom,@sort_order)`
+      );
+      for (const it of preorderItems)
+        if (preIds.has(it.preorder_id))
+          insPreItem.run({
+            id: it.id, preorder_id: it.preorder_id, menu_item_id: menuId(it.menu_item_id), name: it.name,
+            qty: it.qty, unit_price: it.unit_price, total: it.total, is_custom: it.is_custom ?? 0, sort_order: it.sort_order ?? 0,
+          });
+
+      const insPrePay = db.prepare(
+        `INSERT INTO preorder_payments (id, preorder_id, amount, mode, received_at, notes)
+         VALUES (@id,@preorder_id,@amount,@mode,@received_at,@notes)`
+      );
+      for (const p of preorderPayments)
+        if (preIds.has(p.preorder_id))
+          insPrePay.run({
+            id: p.id, preorder_id: p.preorder_id, amount: p.amount, mode: p.mode, received_at: p.received_at ?? null, notes: p.notes ?? null,
+          });
+
+      const insCash = db.prepare(
+        `INSERT INTO cash_counts (date, counted_cash, note, counted_at, sync_status)
+         VALUES (@date,@counted_cash,@note,@counted_at,'synced')`
+      );
+      for (const c of cashCounts)
+        insCash.run({ date: c.date, counted_cash: c.counted_cash ?? 0, note: c.note ?? null, counted_at: c.counted_at ?? null });
+    });
+    tx();
+
+    return { ok: true, counts: { bills: bills.length, preorders: preorders.length, cash_counts: cashCounts.length } };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
 /** Count rows actually eligible for sync (terminal bills + all pre-orders). */
 export function pendingCount(): number {
   const db = getDb();

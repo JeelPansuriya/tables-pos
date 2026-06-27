@@ -16,6 +16,7 @@ type Row = {
   customer_name: string | null;
   customer_mobile: string | null;
   table_label: string | null;
+  modes: string | null;
 };
 
 function ymd(d: Date): string {
@@ -24,6 +25,16 @@ function ymd(d: Date): string {
   ).padStart(2, '0')}`;
 }
 
+const MODE_COLORS: Record<string, string> = {
+  cash: 'bg-emerald-100 text-emerald-800',
+  upi: 'bg-sky-100 text-sky-800',
+  card: 'bg-violet-100 text-violet-800',
+  other: 'bg-stone-100 text-stone-700',
+};
+
+// Common reasons for voiding a finalized bill (manager can still type a custom one).
+const VOID_REASONS = ['Wrong payment mode', 'Wrong order', 'Test', 'Other'];
+
 export default function BillsPage() {
   const today = ymd(new Date());
   const [from, setFrom] = useState(today);
@@ -31,6 +42,9 @@ export default function BillsPage() {
   const [status, setStatus] = useState<string>('');
   const [type, setType] = useState<string>('');
   const [meal, setMeal] = useState<string>('');
+  const [mode, setMode] = useState<string>('');
+  const [tableLabel, setTableLabel] = useState<string>('');
+  const [tableLabels, setTableLabels] = useState<string[]>([]);
   const [q, setQ] = useState('');
   const [rows, setRows] = useState<Row[]>([]);
   const [voiding, setVoiding] = useState<Row | null>(null);
@@ -47,9 +61,24 @@ export default function BillsPage() {
   >({});
 
   async function refresh() {
-    const r = await api.bills.list({ from, to, status, q, type, meal_type: meal });
+    const r = await api.bills.list({
+      from,
+      to,
+      status,
+      q,
+      type,
+      meal_type: meal,
+      mode,
+      table_label: tableLabel,
+    });
     if (r?.ok) setRows(r.bills);
   }
+
+  useEffect(() => {
+    api.tables.list().then((r: any) => {
+      if (r?.ok) setTableLabels(r.tables.map((t: any) => t.label));
+    });
+  }, []);
 
   async function toggle(id: number) {
     if (expandedId === id) {
@@ -68,7 +97,7 @@ export default function BillsPage() {
   }
   useEffect(() => {
     refresh();
-  }, [from, to, status, type, meal]);
+  }, [from, to, status, type, meal, mode, tableLabel]);
 
   async function doVoid(reason: string) {
     if (!voiding) return;
@@ -122,6 +151,27 @@ export default function BillsPage() {
             <option value="dinner">Dinner</option>
           </select>
         </div>
+        <div>
+          <label className="text-xs text-stone-600">Mode</label>
+          <select className="input" value={mode} onChange={(e) => setMode(e.target.value)}>
+            <option value="">All</option>
+            <option value="cash">Cash</option>
+            <option value="upi">UPI</option>
+            <option value="card">Card</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-stone-600">Table</label>
+          <select className="input" value={tableLabel} onChange={(e) => setTableLabel(e.target.value)}>
+            <option value="">All</option>
+            {tableLabels.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="flex-1">
           <label className="text-xs text-stone-600">Search (token / customer)</label>
           <input className="input" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && refresh()} />
@@ -140,6 +190,7 @@ export default function BillsPage() {
               <th className="p-2">Table</th>
               <th className="p-2">Customer</th>
               <th className="p-2">Total</th>
+              <th className="p-2">Mode</th>
               <th className="p-2">Status</th>
               <th className="p-2"></th>
             </tr>
@@ -162,6 +213,21 @@ export default function BillsPage() {
                 <td className="p-2">{r.table_label ?? '—'}</td>
                 <td className="p-2">{r.customer_name ?? '—'}</td>
                 <td className="p-2 font-medium">₹{r.total.toFixed(2)}</td>
+                <td className="p-2">
+                  <div className="flex flex-wrap gap-1">
+                    {(r.modes ? r.modes.split(',') : []).map((m) => (
+                      <span
+                        key={m}
+                        className={`rounded px-1.5 py-0.5 text-xs font-medium capitalize ${
+                          MODE_COLORS[m] ?? MODE_COLORS.other
+                        }`}
+                      >
+                        {m}
+                      </span>
+                    ))}
+                    {!r.modes && <span className="text-stone-400">—</span>}
+                  </div>
+                </td>
                 <td className="p-2">
                   {r.status === 'cancelled' ? (
                     <span className="rounded bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-800">
@@ -197,7 +263,7 @@ export default function BillsPage() {
               </tr>
               {expandedId === r.id && (
                 <tr className="border-t border-stone-100 bg-stone-50/60">
-                  <td colSpan={8} className="px-4 py-3">
+                  <td colSpan={9} className="px-4 py-3">
                     {details[r.id] ? (
                       <div className="grid gap-3 sm:grid-cols-[1fr_16rem]">
                         <div>
@@ -250,7 +316,7 @@ export default function BillsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-4 text-center text-stone-500">
+                <td colSpan={9} className="p-4 text-center text-stone-500">
                   No bills in range.
                 </td>
               </tr>
@@ -265,6 +331,7 @@ export default function BillsPage() {
           message={`This reverses a finalized sale of ₹${voiding.total.toFixed(2)}. It will be removed from revenue and the day summary, and listed under cancelled bills.`}
           reasonLabel="Reason for voiding (required)"
           reasonRequired
+          reasonOptions={VOID_REASONS}
           confirmLabel="Void bill"
           cancelLabel="Keep bill"
           onConfirm={doVoid}

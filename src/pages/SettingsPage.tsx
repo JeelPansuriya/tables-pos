@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
+import ReasonModal from '../components/ReasonModal';
 
 type Field = { key: string; label: string; type?: string; help?: string };
 
@@ -34,6 +35,54 @@ export default function SettingsPage() {
   const [pwOld, setPwOld] = useState('');
   const [pwNew, setPwNew] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [backupInfo, setBackupInfo] = useState<{ extraDir: string; lastBackupAt: string | null }>({
+    extraDir: '',
+    lastBackupAt: null,
+  });
+
+  async function loadBackupInfo() {
+    const r = await api.backup.status();
+    if (r?.ok) setBackupInfo({ extraDir: r.extraDir || '', lastBackupAt: r.lastBackupAt || null });
+  }
+  useEffect(() => {
+    loadBackupInfo();
+  }, []);
+
+  async function backupNow() {
+    const r = await api.backup.now();
+    setMsg(r?.ok ? 'Backup saved.' : r?.error || 'Backup failed');
+    await loadBackupInfo();
+  }
+  async function chooseBackupDir() {
+    const r = await api.backup.chooseDir();
+    if (r?.ok && r.dir) setMsg('Off-PC backup folder set.');
+    await loadBackupInfo();
+  }
+  async function clearBackupDir() {
+    await api.backup.clearDir();
+    await loadBackupInfo();
+  }
+
+  async function doRestore() {
+    setRestoreOpen(false);
+    setRestoring(true);
+    setMsg('Restoring from cloud… do not close the app.');
+    const r = await api.cloud.pullSnapshot();
+    setRestoring(false);
+    if (r?.ok) {
+      const c = r.counts || {};
+      setMsg(
+        `Restored from cloud: ${c.bills ?? 0} bills, ${c.preorders ?? 0} pre-orders, ${
+          c.cash_counts ?? 0
+        } cash counts. Reloading…`
+      );
+      setTimeout(() => window.location.reload(), 1500);
+    } else {
+      setMsg(r?.error || 'Restore failed');
+    }
+  }
 
   useEffect(() => {
     setDraft({ ...settings });
@@ -125,6 +174,44 @@ export default function SettingsPage() {
       </div>
 
       <div className="card p-4 space-y-3">
+        <h2 className="text-sm font-semibold">Local backups</h2>
+        <p className="text-xs text-stone-500">
+          The database is backed up automatically every day (and at launch), kept for 14 days on this
+          PC. Set an <strong>off-PC folder</strong> (a OneDrive / Google Drive synced folder, or a USB
+          drive) to also copy each daily backup there — so your data survives even if this PC fails.
+        </p>
+        <div className="text-sm">
+          <div>
+            Last backup:{' '}
+            <strong>
+              {backupInfo.lastBackupAt ? new Date(backupInfo.lastBackupAt).toLocaleString() : 'never'}
+            </strong>
+          </div>
+          <div className="mt-0.5">
+            Off-PC folder:{' '}
+            {backupInfo.extraDir ? (
+              <code className="break-all">{backupInfo.extraDir}</code>
+            ) : (
+              <span className="text-stone-500">not set</span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-ghost border border-stone-300" onClick={chooseBackupDir}>
+            Choose off-PC folder…
+          </button>
+          {backupInfo.extraDir && (
+            <button className="btn-ghost border border-stone-300" onClick={clearBackupDir}>
+              Remove folder
+            </button>
+          )}
+          <button className="btn-primary" onClick={backupNow}>
+            Back up now
+          </button>
+        </div>
+      </div>
+
+      <div className="card p-4 space-y-3">
         <h2 className="text-sm font-semibold">Change my password</h2>
         <div className="grid grid-cols-2 gap-2">
           <input
@@ -194,12 +281,38 @@ export default function SettingsPage() {
                   Last error: {cloud.lastError}
                 </div>
               )}
-              <button className="btn-primary w-fit" onClick={doSync} disabled={syncing || !cloud.enabled}>
-                {syncing ? 'Syncing…' : 'Sync now'}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn-primary w-fit" onClick={doSync} disabled={syncing || !cloud.enabled}>
+                  {syncing ? 'Syncing…' : 'Sync now'}
+                </button>
+                <button
+                  className="btn-ghost w-fit border border-rose-300 text-rose-700"
+                  onClick={() => setRestoreOpen(true)}
+                  disabled={restoring}
+                >
+                  {restoring ? 'Restoring…' : 'Restore from cloud (override)'}
+                </button>
+              </div>
+              <p className="text-xs text-stone-500">
+                Restore pulls all bills, pre-orders and cash counts from the cloud and{' '}
+                <strong>replaces</strong> what's on this PC. Use it to set up a new machine or recover
+                data — not for everyday use. Menu &amp; settings aren't cloud-backed and stay as-is.
+              </p>
             </div>
           )}
         </div>
+      )}
+
+      {restoreOpen && (
+        <ReasonModal
+          title="Restore from cloud and override this PC?"
+          message="This downloads all bills, pre-orders and cash counts from the cloud and REPLACES the local copy. Any local bills not yet synced (e.g. open bills) will be lost. A local backup is saved first. This cannot be undone from the app."
+          showReason={false}
+          confirmLabel="Override with cloud data"
+          cancelLabel="Cancel"
+          onConfirm={doRestore}
+          onClose={() => setRestoreOpen(false)}
+        />
       )}
 
       {session?.role === 'admin' && (

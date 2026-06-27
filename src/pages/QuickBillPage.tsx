@@ -5,12 +5,16 @@ import type { MealType } from '../types';
 import BillEditor, { type EditorItem } from '../components/BillEditor';
 import PaymentBar, { type PaymentEntry } from '../components/PaymentBar';
 
+// Lunch before the configured cutoff hour (default 17 = 5pm), dinner after.
+function mealForNow(lunchUntilHour: number): MealType {
+  return new Date().getHours() < lunchUntilHour ? 'lunch' : 'dinner';
+}
+
 export default function QuickBillPage() {
   const { menu, settings } = useStore();
   const [items, setItems] = useState<EditorItem[]>([]);
-  const [mealType, setMealType] = useState<MealType>(
-    (settings.default_meal_type as MealType) || 'dinner'
-  );
+  const lunchUntil = parseInt(settings.lunch_until_hour || '17', 10) || 17;
+  const [mealType, setMealType] = useState<MealType>(mealForNow(lunchUntil));
   // Quick billing is always a takeaway-type sale (dine-in goes through Tables).
   // Takeaway-specific products live in the menu itself, so no type toggle.
   const type = 'takeaway' as const;

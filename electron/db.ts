@@ -217,6 +217,7 @@ function seedDefaults(db: Database.Database) {
     ['lunch_until_hour', '17'],
     ['printer_name', ''],
     ['printer_copies', '1'],
+    ['backup_extra_dir', ''],
     ['supabase_url', ''],
     ['supabase_anon_key', ''],
     ['supabase_table_prefix', 'v2_'],
@@ -277,20 +278,8 @@ export function autoCancelStaleOpenBills(db: Database.Database): number {
   return r.changes;
 }
 
-/**
- * Copy the live database to userData/backups/tables-pos-YYYY-MM-DD.sqlite using
- * SQLite's online backup (safe while the app is running). One file per day;
- * keeps the most recent `keep` days. Runs at launch and daily from main.ts so
- * there's always a recent local copy even when cloud sync is off.
- */
-export async function backupDatabase(keep = 14): Promise<void> {
-  const dir = path.join(app.getPath('userData'), 'backups');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const now = new Date();
-  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
-    now.getDate()
-  ).padStart(2, '0')}`;
-  await getDb().backup(path.join(dir, `tables-pos-${stamp}.sqlite`));
+/** Keep only the most recent `keep` daily backup files in a directory. */
+function pruneBackups(dir: string, keep: number) {
   const files = fs
     .readdirSync(dir)
     .filter((f) => /^tables-pos-.*\.sqlite$/.test(f))
@@ -301,6 +290,54 @@ export async function backupDatabase(keep = 14): Promise<void> {
     } catch {
       // ignore prune failures
     }
+  }
+}
+
+/**
+ * Copy the live database to userData/backups/tables-pos-YYYY-MM-DD.sqlite using
+ * SQLite's online backup (safe while the app is running). One file per day;
+ * keeps the most recent `keep` days. Runs at launch and daily from main.ts so
+ * there's always a recent local copy even when cloud sync is off.
+ *
+ * If `backup_extra_dir` is set (e.g. a OneDrive/Google Drive synced folder or a
+ * USB drive), the same daily file is also copied there — an off-PC copy that
+ * survives a dead/stolen machine. A disconnected/invalid path is ignored.
+ */
+export async function backupDatabase(keep = 14): Promise<void> {
+  const db = getDb();
+  const dir = path.join(app.getPath('userData'), 'backups');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate()
+  ).padStart(2, '0')}`;
+  const fileName = `tables-pos-${stamp}.sqlite`;
+  const primary = path.join(dir, fileName);
+  await db.backup(primary);
+  pruneBackups(dir, keep);
+
+  const extra = (
+    db.prepare(`SELECT value FROM settings WHERE key='backup_extra_dir'`).get() as
+      | { value?: string }
+      | undefined
+  )?.value?.trim();
+  if (extra) {
+    try {
+      if (!fs.existsSync(extra)) fs.mkdirSync(extra, { recursive: true });
+      fs.copyFileSync(primary, path.join(extra, fileName));
+      pruneBackups(extra, keep);
+    } catch (e) {
+      console.error('Off-PC backup copy failed (folder unavailable?):', e);
+    }
+  }
+
+  try {
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('last_backup_at', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(now.toISOString());
+  } catch {
+    // ignore
   }
 }
 

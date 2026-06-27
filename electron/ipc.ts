@@ -1,6 +1,6 @@
-import { ipcMain } from 'electron';
+import { ipcMain, dialog, BrowserWindow } from 'electron';
 import type { Database } from 'better-sqlite3';
-import { getDb } from './db';
+import { getDb, backupDatabase } from './db';
 import {
   getSession,
   hashPassword,
@@ -18,7 +18,7 @@ import {
   printTestSlip,
   type SlipShop,
 } from './printer';
-import { cloudStatus, scheduleSoon, syncPending } from './sync';
+import { cloudStatus, scheduleSoon, syncPending, pullAndOverride } from './sync';
 
 type MealType = 'lunch' | 'dinner';
 type PaymentMode = 'cash' | 'upi' | 'card' | 'other';
@@ -626,15 +626,25 @@ export function registerIpc() {
       where.push(`b.meal_type = ?`);
       args.push(params.meal_type);
     }
+    if (params?.table_label) {
+      where.push(`t.label = ?`);
+      args.push(params.table_label);
+    }
+    if (params?.mode) {
+      where.push(`EXISTS (SELECT 1 FROM bill_payments bp WHERE bp.bill_id = b.id AND bp.mode = ?)`);
+      args.push(params.mode);
+    }
     if (params?.q) {
       where.push(`(b.token_no = ? OR b.customer_name LIKE ? OR b.customer_mobile LIKE ?)`);
       const q = params.q;
       const num = parseInt(q, 10);
       args.push(Number.isFinite(num) ? num : -1, `%${q}%`, `%${q}%`);
     }
+    // Combined payment mode(s) per bill, e.g. "cash" or "cash+upi".
+    const modeExpr = `(SELECT GROUP_CONCAT(DISTINCT bp.mode) FROM bill_payments bp WHERE bp.bill_id = b.id)`;
     const sql = `SELECT b.id, b.token_no, b.type, b.status, b.meal_type, b.total, b.plates,
                         b.opened_at, b.closed_at, b.cancel_reason, b.customer_name, b.customer_mobile,
-                        t.label AS table_label
+                        t.label AS table_label, ${modeExpr} AS modes
                  FROM bills b LEFT JOIN tables t ON t.id=b.table_id
                  WHERE ${where.join(' AND ')}
                  ORDER BY ${dayExpr} DESC, b.token_no DESC, b.id DESC LIMIT 500`;
@@ -1356,13 +1366,68 @@ export function registerIpc() {
     return { ok: true, syncedBills: r.syncedBills, syncedPreorders: r.syncedPreorders };
   });
 
-  // Pull/restore from cloud is intentionally not part of this build — local
-  // SQLite is the source of truth and the backup is push-only.
-  ipcMain.handle('cloud:pullSnapshot', () => {
+  // -------- LOCAL BACKUPS --------
+  ipcMain.handle('backup:status', () => {
+    requireSession();
+    const get = (k: string) =>
+      (db.prepare(`SELECT value FROM settings WHERE key=?`).get(k) as { value?: string } | undefined)
+        ?.value || '';
+    return { ok: true, extraDir: get('backup_extra_dir'), lastBackupAt: get('last_backup_at') || null };
+  });
+
+  ipcMain.handle('backup:now', async () => {
+    requireSession();
+    try {
+      await backupDatabase();
+      const lastBackupAt = (db.prepare(`SELECT value FROM settings WHERE key='last_backup_at'`).get() as
+        | { value?: string }
+        | undefined)?.value;
+      return { ok: true, lastBackupAt };
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+  });
+
+  // Pick (or clear) the off-PC backup folder via a native folder dialog.
+  ipcMain.handle('backup:chooseDir', async () => {
+    requireSession();
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const r = await dialog.showOpenDialog(win!, {
+      title: 'Choose a folder for off-PC backups (e.g. OneDrive / Google Drive / USB)',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (r.canceled || !r.filePaths[0]) return { ok: true, dir: null };
+    const dir = r.filePaths[0];
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('backup_extra_dir', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(dir);
+    return { ok: true, dir };
+  });
+
+  ipcMain.handle('backup:clearDir', () => {
+    requireSession();
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('backup_extra_dir', '')
+       ON CONFLICT(key) DO UPDATE SET value = ''`
+    ).run();
+    return { ok: true };
+  });
+
+  // Admin restore: pull all backed-up data from the cloud and OVERWRITE local
+  // bills/pre-orders/cash. A local DB backup is taken first as a safety net.
+  ipcMain.handle('cloud:pullSnapshot', async () => {
     requireAdmin();
-    return {
-      ok: false,
-      error: 'Pull/restore is not available in this build — cloud sync is a one-way backup.',
-    };
+    const cfg = cloudStatus();
+    if (!cfg.configured)
+      return { ok: false, error: 'Supabase URL/key not set. Add them and enable cloud sync first.' };
+    try {
+      await backupDatabase();
+    } catch {
+      // backup is best-effort; continue with the restore
+    }
+    const r = await pullAndOverride();
+    if (r.ok) logAudit(db, 'cloud.restore', { details: { counts: r.counts } });
+    return r;
   });
 }

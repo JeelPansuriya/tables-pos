@@ -7,6 +7,8 @@ type Props = {
   showReason?: boolean;
   reasonLabel?: string;
   reasonRequired?: boolean;
+  /** Quick-pick reasons shown as buttons above the textarea. */
+  reasonOptions?: string[];
   confirmLabel: string;
   cancelLabel?: string;
   danger?: boolean;
@@ -24,6 +26,7 @@ export default function ReasonModal({
   showReason = true,
   reasonLabel = 'Reason (optional)',
   reasonRequired = false,
+  reasonOptions,
   confirmLabel,
   cancelLabel = 'Keep',
   danger = true,
@@ -55,13 +58,32 @@ export default function ReasonModal({
         <h2 className="text-lg font-semibold">{title}</h2>
         {message && <p className="text-sm text-stone-600">{message}</p>}
         {showReason && (
-          <div>
+          <div className="space-y-2">
             <label className="text-xs text-stone-600">{reasonLabel}</label>
+            {reasonOptions && reasonOptions.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {reasonOptions.map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setReason(opt)}
+                    className={`rounded-full border px-2.5 py-1 text-xs ${
+                      reason === opt
+                        ? 'border-brand-500 bg-brand-50 text-brand-700'
+                        : 'border-stone-300 text-stone-700 hover:bg-stone-50'
+                    }`}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
             <textarea
               className="input"
               rows={2}
               value={reason}
               autoFocus
+              placeholder={reasonOptions?.length ? 'Pick a reason above or type your own' : ''}
               onChange={(e) => setReason(e.target.value)}
             />
           </div>

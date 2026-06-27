@@ -39,6 +39,7 @@ export default function DaySummaryPage() {
   const [date, setDate] = useState(today);
   const [data, setData] = useState<Summary | null>(null);
   const [printMsg, setPrintMsg] = useState<string | null>(null);
+  const [closeDayOpen, setCloseDayOpen] = useState(false);
 
   async function refresh() {
     const r = await api.daySummary(date);
@@ -86,11 +87,30 @@ export default function DaySummaryPage() {
           <button className="btn-ghost border border-stone-300" onClick={() => setDate(today)}>
             Today
           </button>
-          <button className="btn-primary" onClick={print}>
+          <button className="btn-ghost border border-stone-300" onClick={print}>
             Print
           </button>
+          {date === today && (
+            <button className="btn-primary" onClick={() => setCloseDayOpen(true)}>
+              Close day
+            </button>
+          )}
         </div>
       </div>
+
+      {closeDayOpen && (
+        <CloseDayModal
+          date={today}
+          collected={data.totalCollected ?? data.totals.revenue}
+          onClose={() => setCloseDayOpen(false)}
+          onDone={(m) => {
+            setCloseDayOpen(false);
+            setPrintMsg(m);
+            setTimeout(() => setPrintMsg(null), 4000);
+            refresh();
+          }}
+        />
+      )}
       {printMsg && (
         <div className="rounded-md bg-stone-100 px-3 py-2 text-sm text-stone-700">{printMsg}</div>
       )}
@@ -321,6 +341,105 @@ function KPI({ label, value }: { label: string; value: React.ReactNode }) {
     <div className="card p-4">
       <div className="text-xs uppercase tracking-wide text-stone-500">{label}</div>
       <div className="mt-1 text-2xl font-bold">{value}</div>
+    </div>
+  );
+}
+
+// Guided end-of-day close: warns about still-open bills, captures the cash
+// count, and prints the day summary — all in one step.
+function CloseDayModal({
+  date,
+  collected,
+  onClose,
+  onDone,
+}: {
+  date: string;
+  collected: number;
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const [openBills, setOpenBills] = useState<number | null>(null);
+  const [cash, setCash] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.tables.list().then((r: any) => {
+      if (r?.ok) setOpenBills(r.tables.reduce((s: number, t: any) => s + (t.openBills?.length || 0), 0));
+    });
+    api.cash.get(date).then((r: any) => {
+      if (r?.ok && r.counted != null) setCash(String(r.counted));
+    });
+  }, [date]);
+
+  async function finish() {
+    setBusy(true);
+    setErr(null);
+    if (cash.trim() !== '') {
+      const cr = await api.cash.set({ date, counted_cash: parseFloat(cash) || 0 });
+      if (!cr?.ok) {
+        setBusy(false);
+        return setErr(cr?.error || 'Could not save cash count');
+      }
+    }
+    const pr = await api.daySummaryPrint(date);
+    setBusy(false);
+    onDone(pr?.ok ? 'Day closed — summary printed.' : `Day closed. Print failed: ${pr?.error || ''}`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="card w-full max-w-md space-y-4 p-5" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-semibold">Close day · {date}</h2>
+
+        <div className="rounded-md border border-stone-200 p-3 text-sm">
+          <div className="flex justify-between">
+            <span className="text-stone-600">Collected today</span>
+            <strong>₹{collected.toFixed(2)}</strong>
+          </div>
+        </div>
+
+        {openBills == null ? (
+          <div className="text-sm text-stone-500">Checking open bills…</div>
+        ) : openBills > 0 ? (
+          <div className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            ⚠️ {openBills} table bill{openBills === 1 ? '' : 's'} still open. Settle or cancel them on
+            the Tables page first — open bills aren't counted in today's totals and are auto-cancelled
+            after midnight.
+          </div>
+        ) : (
+          <div className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+            All table bills are settled. ✓
+          </div>
+        )}
+
+        <div>
+          <label className="text-xs text-stone-600">Cash counted in drawer (end of day)</label>
+          <input
+            type="number"
+            min={0}
+            className="input w-44"
+            value={cash}
+            onChange={(e) => setCash(e.target.value)}
+            placeholder="₹"
+            autoFocus
+          />
+          <p className="mt-1 text-xs text-stone-500">
+            Saved as today's count — tomorrow's cash expense is computed from it.
+          </p>
+        </div>
+
+        {err && <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</div>}
+
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost border border-stone-300" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn-primary" onClick={finish} disabled={busy}>
+            {busy ? 'Working…' : 'Save count & print summary'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

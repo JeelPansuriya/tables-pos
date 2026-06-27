@@ -101,6 +101,8 @@ const api = {
       q?: string;
       type?: string;
       meal_type?: string;
+      table_label?: string;
+      mode?: string;
     }) => invoke('bills:list', params),
     get: (id: number) => invoke('bills:get', id),
     reprint: (id: number) => invoke('bills:reprint', id),
@@ -188,6 +190,12 @@ const api = {
     pushPending: () => invoke('cloud:pushPending'),
     pullSnapshot: () => invoke('cloud:pullSnapshot'),
     status: () => invoke('cloud:status'),
+  },
+  backup: {
+    status: () => invoke('backup:status'),
+    now: () => invoke('backup:now'),
+    chooseDir: () => invoke('backup:chooseDir'),
+    clearDir: () => invoke('backup:clearDir'),
   },
   update: {
     status: () => invoke('update:status'),
