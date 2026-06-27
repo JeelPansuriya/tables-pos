@@ -227,12 +227,17 @@ export function rangeAnalytics(
     if (inRange(d)) cashInByDay.set(d, (cashInByDay.get(d) ?? 0) + p.amount);
   }
   const countByDate = new Map(cashCounts.map((c) => [c.date, c.counted_cash]));
+  // First day ever counted assumes a ₹0 opening (bootstrap), matching the app.
+  const firstCounted = cashCounts.length
+    ? cashCounts.map((c) => c.date).sort()[0]
+    : null;
   const cashDates = new Set<string>([...dailyMap.keys(), ...cashInByDay.keys()]);
   cashCounts.forEach((c) => inRange(c.date) && cashDates.add(c.date));
   const cash = [...cashDates].sort().map((date) => {
     const collected = +(cashInByDay.get(date) ?? 0).toFixed(2);
     const counted = countByDate.has(date) ? countByDate.get(date)! : null;
-    const prev = countByDate.has(prevDayKey(date)) ? countByDate.get(prevDayKey(date))! : null;
+    const rawPrev = countByDate.has(prevDayKey(date)) ? countByDate.get(prevDayKey(date))! : null;
+    const prev = rawPrev != null ? rawPrev : date === firstCounted ? 0 : null;
     const expense = counted != null && prev != null ? +(prev + collected - counted).toFixed(2) : null;
     return { date, collected, counted, expense };
   });

@@ -200,6 +200,7 @@ export default function DaySummaryPage() {
 type CashInfo = {
   date: string;
   counted: number | null;
+  openingAssumed: boolean;
   note: string;
   prevDate: string;
   prevCounted: number | null;
@@ -238,8 +239,9 @@ function CashCard({ date }: { date: string }) {
 
   if (!info) return null;
   const counted = parseFloat(draft);
+  const canExpense = info.prevCounted != null || info.openingAssumed;
   const liveExpense =
-    !isNaN(counted) && info.prevCounted != null ? +(info.expected - counted).toFixed(2) : null;
+    !isNaN(counted) && canExpense ? +(info.expected - counted).toFixed(2) : null;
 
   return (
     <div className="card space-y-3 p-3">
@@ -277,10 +279,16 @@ function CashCard({ date }: { date: string }) {
           Save count
         </button>
       </div>
-      {info.prevCounted == null && (
+      {info.openingAssumed && (
+        <p className="text-xs text-stone-500">
+          First count — assuming an empty (₹0) opening drawer. Enter the actual opening float here if
+          there was one; from tomorrow the expense uses this day's counted close.
+        </p>
+      )}
+      {info.prevCounted == null && !info.openingAssumed && (
         <p className="text-xs text-amber-700">
-          No cash count saved for {info.prevDate} — the expense can't be computed until the previous
-          day is counted.
+          No cash count saved for {info.prevDate} — the expense can't be computed for this day until
+          {' '}{info.prevDate} is counted.
         </p>
       )}
     </div>

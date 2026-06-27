@@ -1120,12 +1120,21 @@ export function registerIpc() {
     const todayCash = cashCollectedFor(d);
     const counted = row ? row.counted_cash : null;
     const expected = +((prevCounted ?? 0) + todayCash).toFixed(2);
+    // Bootstrap: if this is the very first day ever counted (no earlier count
+    // exists), assume a ₹0 opening drawer so the expense computes from day one
+    // without needing to seed the previous day. A genuine mid-stream gap (an
+    // earlier count exists but yesterday's is missing) still shows "—".
+    const hasEarlier = !!db.prepare(`SELECT 1 FROM cash_counts WHERE date < ? LIMIT 1`).get(d);
+    const openingAssumed = prevCounted == null && !hasEarlier;
     const expense =
-      counted != null && prevCounted != null ? +(expected - counted).toFixed(2) : null;
+      counted != null && (prevCounted != null || openingAssumed)
+        ? +(expected - counted).toFixed(2)
+        : null;
     return {
       ok: true,
       date: d,
       counted,
+      openingAssumed,
       note: row?.note ?? '',
       countedAt: row?.counted_at ?? null,
       prevDate,
@@ -1257,14 +1266,16 @@ export function registerIpc() {
     counts.forEach((r) => {
       if (r.date >= from) dateSet.add(r.date);
     });
+    // The very first day ever counted assumes a ₹0 opening (bootstrap), so its
+    // expense computes without a seeded previous day.
+    const firstCounted = (db.prepare(`SELECT MIN(date) AS d FROM cash_counts`).get() as { d: string | null }).d;
     const cash = [...dateSet].sort().map((date) => {
       const collected = +(cashByDate.get(date) ?? 0).toFixed(2);
       const counted = countByDate.has(date) ? countByDate.get(date)! : null;
-      const prevCounted = countByDate.has(prevDayStr(date)) ? countByDate.get(prevDayStr(date))! : null;
+      const rawPrev = countByDate.has(prevDayStr(date)) ? countByDate.get(prevDayStr(date))! : null;
+      const prevEff = rawPrev != null ? rawPrev : date === firstCounted ? 0 : null;
       const expense =
-        counted != null && prevCounted != null
-          ? +((prevCounted + collected) - counted).toFixed(2)
-          : null;
+        counted != null && prevEff != null ? +((prevEff + collected) - counted).toFixed(2) : null;
       return { date, collected, counted, expense };
     });
     const totalCashExpense = +cash.reduce((s, c) => s + (c.expense ?? 0), 0).toFixed(2);

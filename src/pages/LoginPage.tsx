@@ -3,7 +3,7 @@ import { useStore } from '../store';
 
 export default function LoginPage() {
   const { login } = useStore();
-  const [username, setUsername] = useState('owner');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -21,7 +21,7 @@ export default function LoginPage() {
     <div className="flex h-full items-center justify-center bg-gradient-to-br from-brand-50 to-stone-100 p-4">
       <form onSubmit={onSubmit} className="card w-full max-w-sm p-6 space-y-4">
         <div>
-          <h1 className="text-xl font-bold text-brand-700">Girr Kathiyawadi · Tables</h1>
+          <h1 className="text-xl font-bold text-brand-700">JAY GIRR KATHIYAWADI</h1>
           <p className="text-sm text-stone-500">Sign in to continue</p>
         </div>
         <div className="space-y-1">
