@@ -108,6 +108,7 @@ const api = {
     reprint: (id: number) => invoke('bills:reprint', id),
     void: (id: number, reason: string) => invoke('bills:void', { billId: id, reason }),
     testPrint: () => invoke('bills:testPrint'),
+    recomputePlates: () => invoke('bills:recomputePlates'),
   },
   preorders: {
     list: (params: { from?: string; to?: string; status?: string }) =>

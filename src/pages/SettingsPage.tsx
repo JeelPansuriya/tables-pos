@@ -65,6 +65,11 @@ export default function SettingsPage() {
     await loadBackupInfo();
   }
 
+  async function recomputePlates() {
+    const r = await api.bills.recomputePlates();
+    setMsg(r?.ok ? `Recomputed plate counts for ${r.updated} bills.` : r?.error || 'Failed');
+  }
+
   async function doRestore() {
     setRestoreOpen(false);
     setRestoring(true);
@@ -313,6 +318,21 @@ export default function SettingsPage() {
           onConfirm={doRestore}
           onClose={() => setRestoreOpen(false)}
         />
+      )}
+
+      {session?.role === 'admin' && (
+        <div className="card p-4 space-y-3">
+          <h2 className="text-sm font-semibold">Maintenance</h2>
+          <p className="text-xs text-stone-500">
+            Bills store each item's plate weight as it was at the time of sale. If you change a menu
+            item's plate weight, past bills keep the old value. Run this to rewrite every bill's plate
+            count using the <strong>current</strong> menu weights — fixes the Day Summary / Analytics
+            plate totals for past days.
+          </p>
+          <button className="btn-ghost w-fit border border-stone-300" onClick={recomputePlates}>
+            Recompute plate counts
+          </button>
+        </div>
       )}
 
       {session?.role === 'admin' && (

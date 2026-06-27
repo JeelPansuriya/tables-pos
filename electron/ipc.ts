@@ -710,6 +710,28 @@ export function registerIpc() {
     return { ok: true };
   });
 
+  // Admin maintenance: rewrite every bill's plate count using the CURRENT menu
+  // plate weights (bills store the weight as it was at sale time, so changing a
+  // menu item's plate weight doesn't retroactively fix past bills until this runs).
+  // Custom/deleted items fall back to their stored weight (custom = 0).
+  ipcMain.handle('bills:recomputePlates', () => {
+    requireAdmin();
+    const r = db
+      .prepare(
+        `UPDATE bills SET
+           plates = (
+             SELECT COALESCE(SUM(bi.qty * COALESCE(mi.plate_weight, bi.plate_weight, 0)), 0)
+             FROM bill_items bi LEFT JOIN menu_items mi ON mi.id = bi.menu_item_id
+             WHERE bi.bill_id = bills.id
+           ),
+           sync_status = 'pending'`
+      )
+      .run();
+    logAudit(db, 'bills.recomputePlates', { details: { bills: r.changes } });
+    scheduleSoon();
+    return { ok: true, updated: r.changes };
+  });
+
   // -------- PRE-ORDERS --------
   ipcMain.handle('preorders:list', (_e, params) => {
     requireSession();
