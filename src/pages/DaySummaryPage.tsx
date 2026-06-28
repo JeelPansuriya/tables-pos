@@ -5,7 +5,7 @@ type Summary = {
   date: string;
   totals: { bills: number; revenue: number; plates: number };
   byMode: Array<{ mode: string; amt: number }>;
-  byMeal: Array<{ meal_type: string; bills: number; revenue: number }>;
+  byMeal: Array<{ meal_type: string; bills: number; plates: number; revenue: number }>;
   items: Array<{ name: string; qty: number; revenue: number }>;
   preorderPaid: number;
   totalCollected: number;
@@ -166,7 +166,7 @@ export default function DaySummaryPage() {
             <thead className="text-left text-stone-500">
               <tr>
                 <th className="p-1">Meal</th>
-                <th className="p-1">Bills</th>
+                <th className="p-1">Plates</th>
                 <th className="p-1">Revenue</th>
               </tr>
             </thead>
@@ -174,7 +174,7 @@ export default function DaySummaryPage() {
               {data.byMeal.map((m) => (
                 <tr key={m.meal_type} className="border-t border-stone-100">
                   <td className="p-1 capitalize">{m.meal_type}</td>
-                  <td className="p-1">{m.bills}</td>
+                  <td className="p-1">{m.plates.toFixed(1)}</td>
                   <td className="p-1">₹{m.revenue.toFixed(2)}</td>
                 </tr>
               ))}

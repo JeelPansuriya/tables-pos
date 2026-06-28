@@ -259,7 +259,7 @@ export type SlipDaySummary = {
   date: string;
   totals: { bills: number; revenue: number; plates: number };
   byMode: Array<{ mode: string; amt: number }>;
-  byMeal: Array<{ meal_type: string; bills: number; revenue: number }>;
+  byMeal: Array<{ meal_type: string; bills: number; plates: number; revenue: number }>;
   items: Array<{ name: string; qty: number; revenue: number }>;
   preorderPaid: number;
   totalCollected: number;
@@ -288,7 +288,8 @@ export async function printDaySummary(
   if (s.byMode.length === 0) lines.push(left('  (none)'));
   lines.push(divider());
   lines.push(left('By meal', true));
-  for (const m of s.byMeal) lines.push(row(`  ${m.meal_type} (${m.bills})`, formatINR(m.revenue)));
+  for (const m of s.byMeal)
+    lines.push(row(`  ${m.meal_type} (${m.plates} plates)`, formatINR(m.revenue)));
   lines.push(divider());
   lines.push(left('Items sold', true));
   for (const it of s.items) lines.push(row(`  ${it.name} x${it.qty}`, formatINR(it.revenue)));

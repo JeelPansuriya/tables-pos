@@ -1048,11 +1048,12 @@ export function registerIpc() {
       .all(d, d) as Array<{ mode: string; amt: number }>;
     const byMeal = db
       .prepare(
-        `SELECT meal_type, COUNT(*) AS bills, COALESCE(SUM(total),0) AS revenue
+        `SELECT meal_type, COUNT(*) AS bills, COALESCE(SUM(plates),0) AS plates,
+                COALESCE(SUM(total),0) AS revenue
          FROM bills WHERE status='closed' AND date(opened_at,'localtime') = ?
          GROUP BY meal_type`
       )
-      .all(d) as Array<{ meal_type: string; bills: number; revenue: number }>;
+      .all(d) as Array<{ meal_type: string; bills: number; plates: number; revenue: number }>;
     const items = db
       .prepare(
         `SELECT bi.name, SUM(bi.qty) AS qty, SUM(bi.total) AS revenue
