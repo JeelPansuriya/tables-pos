@@ -716,12 +716,19 @@ export function registerIpc() {
   // Custom/deleted items fall back to their stored weight (custom = 0).
   ipcMain.handle('bills:recomputePlates', () => {
     requireAdmin();
+    // Resolve the current weight by NAME first (menu_items.name is unique and
+    // survives an item being re-created with a new id), then by id, then the
+    // stored snapshot, then 0. Matching by id alone missed bills that pointed at
+    // re-created menu items and wrongly kept the old snapshot weight.
     const r = db
       .prepare(
         `UPDATE bills SET
            plates = (
-             SELECT COALESCE(SUM(bi.qty * COALESCE(mi.plate_weight, bi.plate_weight, 0)), 0)
-             FROM bill_items bi LEFT JOIN menu_items mi ON mi.id = bi.menu_item_id
+             SELECT COALESCE(SUM(bi.qty * COALESCE(
+                      (SELECT m.plate_weight FROM menu_items m WHERE m.name = bi.name),
+                      (SELECT m2.plate_weight FROM menu_items m2 WHERE m2.id = bi.menu_item_id),
+                      bi.plate_weight, 0)), 0)
+             FROM bill_items bi
              WHERE bi.bill_id = bills.id
            ),
            sync_status = 'pending'`
