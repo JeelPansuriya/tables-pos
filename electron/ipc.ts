@@ -119,11 +119,23 @@ function getBillForSlip(db: Database, billId: number) {
     )
     .get(billId) as any;
   if (!bill) throw new Error('Bill not found');
+  // Include menu_item_id / plate_weight / is_custom so a reloaded bill keeps each
+  // line's identity — otherwise re-adding the same item appends a duplicate line
+  // instead of bumping qty, and re-saving would reset plate weights to 1.
   const items = db
     .prepare(
-      `SELECT name, qty, unit_price, total FROM bill_items WHERE bill_id=? ORDER BY sort_order, id`
+      `SELECT menu_item_id, name, qty, unit_price, plate_weight, total, is_custom
+       FROM bill_items WHERE bill_id=? ORDER BY sort_order, id`
     )
-    .all(billId) as Array<{ name: string; qty: number; unit_price: number; total: number }>;
+    .all(billId) as Array<{
+    menu_item_id: number | null;
+    name: string;
+    qty: number;
+    unit_price: number;
+    plate_weight: number;
+    total: number;
+    is_custom: number;
+  }>;
   const payments = db
     .prepare(
       `SELECT amount, mode, cash_received, change_given FROM bill_payments WHERE bill_id=? ORDER BY id`
