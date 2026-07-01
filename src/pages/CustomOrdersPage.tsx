@@ -828,13 +828,13 @@ function PreorderDetail({
               <button className="btn-ghost border border-stone-300" onClick={() => api.preorders.printReceipt(id)}>
                 Reprint receipt
               </button>
-              {!terminal && isAdmin && (
+              {p.status !== 'cancelled' && (
                 <button
                   className="btn-ghost text-rose-700"
                   onClick={() => setCancelOpen(true)}
                   disabled={busy}
                 >
-                  Cancel order
+                  {p.status === 'fulfilled' ? 'Void order' : 'Cancel order'}
                 </button>
               )}
             </div>
@@ -844,9 +844,16 @@ function PreorderDetail({
 
       {cancelOpen && (
         <ReasonModal
-          title={`Cancel pre-order #${p?.order_no ?? id}?`}
-          message="This marks the pre-order cancelled. This cannot be undone."
-          confirmLabel="Cancel order"
+          title={`${p?.status === 'fulfilled' ? 'Void' : 'Cancel'} pre-order #${p?.order_no ?? id}?`}
+          message={
+            p?.status === 'fulfilled'
+              ? 'This reverses the fulfilled sale — the linked bill is voided too, so it drops out of revenue and the day summary.'
+              : 'This marks the pre-order cancelled. This cannot be undone.'
+          }
+          reasonLabel="Reason (required)"
+          reasonRequired
+          reasonOptions={['Customer cancelled', 'Wrong order', 'Duplicate', 'Test', 'Other']}
+          confirmLabel={p?.status === 'fulfilled' ? 'Void order' : 'Cancel order'}
           cancelLabel="Keep order"
           onConfirm={cancel}
           onClose={() => setCancelOpen(false)}

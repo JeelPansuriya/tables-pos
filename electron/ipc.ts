@@ -992,12 +992,30 @@ export function registerIpc() {
     return { ok: true };
   });
 
+  // Cancel/void a pre-order in any state (pending → fulfilled). If it was already
+  // fulfilled, also void its linked bill so the sale reverses out of revenue and
+  // the day summary. Payment history (advances) is kept as a record of what was
+  // actually taken.
   ipcMain.handle('preorders:cancel', (_e, { id, reason }) => {
-    requireAdmin();
-    db.prepare(
-      `UPDATE preorders SET status='cancelled', cancelled_at=datetime('now'),
-              cancel_reason=?, sync_status='pending' WHERE id=?`
-    ).run(reason || null, id);
+    requireSession();
+    const pre = db.prepare(`SELECT status, fulfilled_bill_id FROM preorders WHERE id=?`).get(id) as
+      | { status: string; fulfilled_bill_id: number | null }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled') return { ok: false, error: 'Already cancelled' };
+    const tx = db.transaction(() => {
+      db.prepare(
+        `UPDATE preorders SET status='cancelled', cancelled_at=datetime('now'),
+                cancel_reason=?, sync_status='pending' WHERE id=?`
+      ).run(reason || null, id);
+      if (pre.fulfilled_bill_id) {
+        db.prepare(
+          `UPDATE bills SET status='cancelled', cancelled_at=datetime('now'),
+                  cancel_reason=?, sync_status='pending' WHERE id=? AND status='closed'`
+        ).run(reason ? `Pre-order voided: ${reason}` : 'Pre-order voided', pre.fulfilled_bill_id);
+      }
+    });
+    tx();
     scheduleSoon();
     return { ok: true };
   });
