@@ -126,6 +126,7 @@ function initSchema(db: Database.Database) {
       meal_type TEXT CHECK (meal_type IN ('lunch','dinner')),
       notes TEXT,
       total REAL NOT NULL DEFAULT 0,
+      discount REAL NOT NULL DEFAULT 0,
       advance_paid REAL NOT NULL DEFAULT 0,
       balance_due REAL NOT NULL DEFAULT 0,
       status TEXT NOT NULL CHECK (status IN ('pending','partial','paid','fulfilled','cancelled')) DEFAULT 'pending',
@@ -188,6 +189,10 @@ function initSchema(db: Database.Database) {
   // Migrate older dev databases that created cash_counts without sync_status.
   if (!tableHasColumn(db, 'cash_counts', 'sync_status')) {
     db.exec(`ALTER TABLE cash_counts ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending'`);
+  }
+  // Migrate: pre-order discount (applied at fulfillment).
+  if (!tableHasColumn(db, 'preorders', 'discount')) {
+    db.exec(`ALTER TABLE preorders ADD COLUMN discount REAL NOT NULL DEFAULT 0`);
   }
 
   seedTables(db);

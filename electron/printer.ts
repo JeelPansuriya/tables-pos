@@ -203,6 +203,7 @@ export type SlipPreorder = {
   meal_type?: string | null;
   notes?: string | null;
   total: number;
+  discount?: number;
   advance_paid: number;
   balance_due: number;
   items: Array<{ name: string; qty: number; unit_price: number; total: number }>;
@@ -232,6 +233,7 @@ export async function printPreorderReceipt(
   }
   lines.push(divider());
   lines.push(row('TOTAL', formatINR(pre.total), true));
+  if (pre.discount && pre.discount > 0) lines.push(row('Discount', '-' + formatINR(pre.discount)));
   lines.push(row('Advance paid', formatINR(pre.advance_paid)));
   lines.push(row('Balance due', formatINR(pre.balance_due), true));
   if (pre.notes) {

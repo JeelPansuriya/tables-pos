@@ -95,11 +95,16 @@ function recomputePreorderTotals(db: Database, preorderId: number) {
   const pays = db
     .prepare(`SELECT COALESCE(SUM(amount), 0) AS a FROM preorder_payments WHERE preorder_id=?`)
     .get(preorderId) as { a: number };
+  const disc = (db.prepare(`SELECT discount FROM preorders WHERE id=?`).get(preorderId) as
+    | { discount: number }
+    | undefined)?.discount ?? 0;
   const total = items.t;
   const advance = pays.a;
-  const balance = Math.max(0, total - advance);
+  // Net payable = items total − discount; balance is what's left after advances.
+  const net = Math.max(0, total - disc);
+  const balance = Math.max(0, +(net - advance).toFixed(2));
   let status = 'pending';
-  if (advance >= total && total > 0) status = 'paid';
+  if (advance >= net && net > 0) status = 'paid';
   else if (advance > 0) status = 'partial';
   db.prepare(
     `UPDATE preorders SET total=?, advance_paid=?, balance_due=?,
@@ -842,6 +847,24 @@ export function registerIpc() {
     db.prepare(
       `INSERT INTO preorder_payments (preorder_id, amount, mode, notes) VALUES (?, ?, ?, ?)`
     ).run(id, payment.amount, payment.mode, payment.notes ?? null);
+    recomputePreorderTotals(db, id);
+    scheduleSoon();
+    return { ok: true };
+  });
+
+  // Discount on a pre-order (typically applied at fulfillment, before the final
+  // payment). Reduces the net payable and the balance due. Clamped to the items
+  // total; can't change a fulfilled/cancelled order.
+  ipcMain.handle('preorders:setDiscount', (_e, { id, amount }) => {
+    requireSession();
+    const pre = db.prepare(`SELECT status, total FROM preorders WHERE id=?`).get(id) as
+      | { status: string; total: number }
+      | undefined;
+    if (!pre) return { ok: false, error: 'Not found' };
+    if (pre.status === 'cancelled' || pre.status === 'fulfilled')
+      return { ok: false, error: `Cannot change a ${pre.status} order` };
+    const disc = Math.max(0, Math.min(+amount || 0, pre.total));
+    db.prepare(`UPDATE preorders SET discount=?, sync_status='pending' WHERE id=?`).run(disc, id);
     recomputePreorderTotals(db, id);
     scheduleSoon();
     return { ok: true };

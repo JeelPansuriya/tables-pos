@@ -167,6 +167,7 @@ const api = {
     ) => invoke('preorders:setItems', { id, items }),
     setAdvance: (id: number, amount: number, mode: 'cash' | 'upi') =>
       invoke('preorders:setAdvance', { id, amount, mode }),
+    setDiscount: (id: number, amount: number) => invoke('preorders:setDiscount', { id, amount }),
     fulfill: (id: number, billId: number | null) =>
       invoke('preorders:fulfill', { id, billId }),
     cancel: (id: number, reason: string) =>

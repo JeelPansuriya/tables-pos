@@ -411,6 +411,7 @@ function PreorderDetail({
   const [editItems, setEditItems] = useState<EditorItem[]>([]);
   const [advDraft, setAdvDraft] = useState(0);
   const [advMode, setAdvMode] = useState<PaymentMode>('cash');
+  const [discDraft, setDiscDraft] = useState(0);
   const [edit, setEdit] = useState({
     customer_name: '',
     customer_mobile: '',
@@ -445,7 +446,18 @@ function PreorderDetail({
       );
       setAdvDraft(+r.preorder.advance_paid.toFixed(2));
       setAdvMode((r.payments[0]?.mode as PaymentMode) || 'cash');
+      setDiscDraft(+(r.preorder.discount || 0).toFixed(2));
     } else setErr(r?.error || 'Not found');
+  }
+
+  async function applyDiscount() {
+    setBusy(true);
+    setErr(null);
+    const r = await api.preorders.setDiscount(id, discDraft);
+    setBusy(false);
+    if (!r?.ok) return setErr(r?.error || 'Failed to apply discount');
+    await load();
+    await onChanged();
   }
 
   async function saveDetails() {
@@ -620,6 +632,12 @@ function PreorderDetail({
                 <span className="text-stone-600">Total</span>
                 <strong>₹{p.total.toFixed(2)}</strong>
               </div>
+              {p.discount > 0 && (
+                <div className="flex justify-between px-2 pb-1 text-sm">
+                  <span className="text-stone-600">Discount</span>
+                  <span className="text-emerald-700">−₹{p.discount.toFixed(2)}</span>
+                </div>
+              )}
               <div className="flex justify-between px-2 pb-1 text-sm">
                 <span className="text-stone-600">Advance paid</span>
                 <span>₹{p.advance_paid.toFixed(2)}</span>
@@ -648,6 +666,27 @@ function PreorderDetail({
             {!terminal && (
               <div className="space-y-2 border-t border-stone-200 pt-3">
                 <div className="text-sm font-medium">Fulfillment</div>
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-stone-600">Discount</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="input w-28"
+                    value={discDraft || ''}
+                    onChange={(e) => setDiscDraft(Math.max(0, parseFloat(e.target.value) || 0))}
+                    placeholder="₹"
+                  />
+                  <button
+                    className="btn-ghost border border-stone-300"
+                    onClick={applyDiscount}
+                    disabled={busy}
+                  >
+                    Apply
+                  </button>
+                  {p.discount > 0 && (
+                    <span className="text-xs text-emerald-700">−₹{p.discount.toFixed(0)} applied</span>
+                  )}
+                </div>
                 {balance > 0 ? (
                   <>
                     <div className="flex items-center justify-between text-sm">
