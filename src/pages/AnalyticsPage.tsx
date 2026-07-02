@@ -69,12 +69,20 @@ export default function AnalyticsPage() {
   });
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     setLoading(true);
-    const r = await api.analytics.overview({ from, to });
-    if (r?.ok) setData(r);
-    setLoading(false);
+    setError(null);
+    try {
+      const r = await api.analytics.overview({ from, to });
+      if (r?.ok) setData(r);
+      else setError(r?.error || 'Could not load analytics');
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => {
     refresh();
@@ -129,8 +137,16 @@ export default function AnalyticsPage() {
         </div>
       </div>
 
+      {error && (
+        <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>
+      )}
+
       {loading && !data ? (
         <div className="py-20 text-center text-stone-400">Loading analytics…</div>
+      ) : error && !data ? (
+        <div className="py-10 text-center text-sm text-stone-400">
+          Couldn't load analytics — try Refresh.
+        </div>
       ) : data ? (
         <>
           <section className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">

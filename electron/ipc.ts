@@ -1391,10 +1391,10 @@ export function registerIpc() {
     // closed_at, over closed dine-in bills in the range.
     const avgRow = db
       .prepare(
-        `SELECT AVG((julianday(closed_at) - julianday(opened_at)) * 1440) AS mins
-         FROM bills
-         WHERE status='closed' AND type='dine_in'
-           AND closed_at IS NOT NULL AND closed_at > opened_at
+        `SELECT AVG((julianday(b.closed_at) - julianday(b.opened_at)) * 1440) AS mins
+         FROM bills b
+         WHERE b.status='closed' AND b.type='dine_in'
+           AND b.closed_at IS NOT NULL AND b.closed_at > b.opened_at
            AND ${day} >= date(?) AND ${day} <= date(?)`
       )
       .get(from, to) as { mins: number | null };
