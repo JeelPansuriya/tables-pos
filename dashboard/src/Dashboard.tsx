@@ -35,6 +35,24 @@ function agoLabel(ms: number): string {
   return `${h}h ${m % 60}m ago`;
 }
 
+// Clock time (e.g. "08:42 pm") in the restaurant timezone, from a UTC timestamp.
+const clockFmt = new Intl.DateTimeFormat('en-IN', {
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: true,
+  timeZone: TIMEZONE,
+});
+function fmtClock(ts: string | null): string {
+  const ms = tsMs(ts);
+  return ms ? clockFmt.format(new Date(ms)) : '—';
+}
+const MODE_CLS: Record<string, string> = {
+  cash: 'bg-emerald-100 text-emerald-800',
+  upi: 'bg-sky-100 text-sky-800',
+  card: 'bg-violet-100 text-violet-800',
+  other: 'bg-stone-100 text-stone-700',
+};
+
 /** UTC cutoff string ("YYYY-MM-DD 00:00:00") for the fetch window. */
 function cutoffIso(days: number): string {
   const d = new Date(Date.now() - days * 86400000);
@@ -174,6 +192,33 @@ export default function Dashboard({ session }: { session: Session }) {
         .map((m) => ({ mode: m.toUpperCase(), amount: Math.round(summary.byMode[m] || 0) }))
         .filter((d) => d.amount > 0)
     : [];
+
+  // Closed bills for the selected day, newest close first, with their pay modes.
+  const todaysBills = useMemo(() => {
+    if (!data) return [];
+    const modeByBill = new Map<number, Set<string>>();
+    for (const p of data.payments) {
+      if (!modeByBill.has(p.bill_id)) modeByBill.set(p.bill_id, new Set());
+      modeByBill.get(p.bill_id)!.add(p.mode);
+    }
+    return data.bills
+      .filter((b) => b.status === 'closed' && bizDay(b.closed_at) === date)
+      .map((b) => ({ ...b, modes: [...(modeByBill.get(b.id) ?? [])] }))
+      .sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || ''));
+  }, [data, date]);
+
+  // Voided bills (once closed, later cancelled — they carry a token) for the day.
+  const voidedBills = useMemo(() => {
+    if (!data) return [];
+    return data.bills
+      .filter(
+        (b) =>
+          b.status === 'cancelled' &&
+          b.token_no != null &&
+          bizDay(b.cancelled_at || b.closed_at) === date
+      )
+      .sort((a, b) => (b.cancelled_at || '').localeCompare(a.cancelled_at || ''));
+  }, [data, date]);
 
   return (
     <div className="mx-auto max-w-5xl p-3 sm:p-5">
@@ -371,6 +416,79 @@ export default function Dashboard({ session }: { session: Session }) {
                 </table>
               ) : (
                 <Empty>None pending</Empty>
+              )}
+            </div>
+          </section>
+
+          <section className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="card p-4">
+              <h2 className="mb-2 text-sm font-semibold text-stone-700">
+                Bills — {date} ({todaysBills.length})
+              </h2>
+              {todaysBills.length ? (
+                <div className="max-h-96 overflow-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-left text-stone-400">
+                      <tr>
+                        <th className="py-1">Token</th>
+                        <th className="py-1">Closed</th>
+                        <th className="py-1">Mode</th>
+                        <th className="py-1 text-right">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {todaysBills.map((b) => (
+                        <tr key={b.id} className="border-t border-stone-100">
+                          <td className="py-1.5">{b.token_no ?? '—'}</td>
+                          <td className="py-1.5 text-stone-500">{fmtClock(b.closed_at)}</td>
+                          <td className="py-1.5">
+                            {b.modes.map((m) => (
+                              <span
+                                key={m}
+                                className={`mr-1 rounded px-1.5 py-0.5 text-[10px] font-medium capitalize ${
+                                  MODE_CLS[m] ?? MODE_CLS.other
+                                }`}
+                              >
+                                {m}
+                              </span>
+                            ))}
+                          </td>
+                          <td className="py-1.5 text-right tabular-nums">{inr(b.total)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <Empty>No bills yet</Empty>
+              )}
+            </div>
+
+            <div className="card p-4">
+              <h2 className="mb-2 text-sm font-semibold text-stone-700">
+                Voided bills ({voidedBills.length})
+              </h2>
+              {voidedBills.length ? (
+                <div className="max-h-96 overflow-auto">
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {voidedBills.map((b) => (
+                        <tr key={b.id} className="border-t border-stone-100">
+                          <td className="py-1.5">{b.token_no ?? '—'}</td>
+                          <td className="py-1.5 text-stone-500">
+                            {fmtClock(b.cancelled_at || b.closed_at)}
+                          </td>
+                          <td className="py-1.5 text-rose-700">{b.cancel_reason || '—'}</td>
+                          <td className="py-1.5 text-right tabular-nums text-rose-700">
+                            −{inr(b.total)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <Empty>None voided</Empty>
               )}
             </div>
           </section>

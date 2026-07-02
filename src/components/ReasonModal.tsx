@@ -53,7 +53,7 @@ export default function ReasonModal({
   }, [showReason, canConfirm, reason, onConfirm, onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <div data-modal className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="card w-full max-w-sm space-y-3 p-5" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-semibold">{title}</h2>
         {message && <p className="text-sm text-stone-600">{message}</p>}

@@ -32,11 +32,16 @@ type Overview = {
     activeDays: number;
     avgPerDay: number;
     avgPerPlate: number;
+    avgPlatesPerDay: number;
+    avgDineMins: number | null;
     totalCashExpense: number;
     bestDay: { date: string; revenue: number } | null;
     peakHour: { hour: number; revenue: number } | null;
   };
 };
+
+const minsLabel = (m: number | null) =>
+  m == null ? '—' : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MODE_HEX: Record<string, string> = {
@@ -140,6 +145,9 @@ export default function AnalyticsPage() {
             <KPI label="Cash expense" value={inr(data.totals.totalCashExpense)} tone="rose" />
             <KPI label="Avg / day" value={inr(data.totals.avgPerDay)} />
             <KPI label="Avg / plate" value={inr(data.totals.avgPerPlate)} />
+            <KPI label="Avg plates / day" value={String(data.totals.avgPlatesPerDay)} />
+            <KPI label="Avg dine-in time" value={minsLabel(data.totals.avgDineMins)} sub="table open → closed" />
+            <KPI label="Total plates" value={String(data.totals.plates)} />
             <KPI
               label="Best day"
               value={data.totals.bestDay ? inr(data.totals.bestDay.revenue) : '—'}

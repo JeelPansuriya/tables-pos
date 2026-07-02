@@ -14,6 +14,17 @@ function mealForNow(lunchUntilHour: number): MealType {
   return new Date().getHours() < lunchUntilHour ? 'lunch' : 'dinner';
 }
 
+// Minutes an open bill has been running (opened_at is UTC text) + a short label.
+function openMinsFrom(openedAt: string, now: number): number {
+  const iso = openedAt.includes('T') ? openedAt : openedAt.replace(' ', 'T');
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(openedAt) ? iso : iso + 'Z');
+  const ms = now - d.getTime();
+  return isNaN(ms) ? 0 : Math.max(0, Math.floor(ms / 60000));
+}
+function durLabel(mins: number): string {
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+}
+
 export default function TablesPage() {
   const { menu, settings } = useStore();
   const [tiles, setTiles] = useState<TableTile[]>([]);
@@ -45,6 +56,8 @@ export default function TablesPage() {
   // before the autosave effect below because that effect's deps reference
   // appliedDiscount — a `const` referenced before declaration throws (TDZ).
   const subtotal = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
+  // Live plate count for the bill being edited (tiles use this for the active bill).
+  const livePlates = items.reduce((s, i) => s + i.qty * (i.plate_weight || 0), 0);
   const maxPct = parseFloat(settings.discount_max_pct || '0') || 0;
   const maxDiscount = +((subtotal * maxPct) / 100).toFixed(2);
   const appliedDiscount = Math.min(Math.max(0, discount), maxDiscount);
@@ -55,8 +68,28 @@ export default function TablesPage() {
     if (r?.ok) setTiles(r.tables);
   }
 
+  // Tick every 30s so "open for Xm" durations stay current.
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
     refresh();
+    const t = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Esc closes the current bill (parks it) and returns to the overview — unless a
+  // modal is open (it handles its own Esc). Ref keeps the latest handler.
+  const escRef = useRef<() => void>(() => {});
+  escRef.current = () => {
+    if (activeBillId && !busy) void backToOverview();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (document.querySelector('[data-modal]')) return; // a modal is open
+      escRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   // Auto-persist (park) the open bill a moment after edits, so switching bills
@@ -95,13 +128,12 @@ export default function TablesPage() {
 
   function selectTable(t: TableTile) {
     setSelectedTableId(t.id);
-    // If the table already has open bill(s), jump straight into one (the first)
-    // instead of making the user click again — unless we're already on one of
-    // this table's bills.
     const alreadyOnThisTable = t.openBills.some((b) => b.id === activeBillId);
-    if (!alreadyOnThisTable && t.openBills.length >= 1) {
-      void loadBill(t.openBills[0].id, t.label);
-    }
+    if (alreadyOnThisTable) return;
+    // Free table → start a new bill straight away. Table with open bill(s) →
+    // open the first one. Either way, one click gets you into a bill.
+    if (t.openBills.length >= 1) void loadBill(t.openBills[0].id, t.label);
+    else void newBillFor(t.id, t.label);
   }
 
   async function newBillFor(tableId: number, label: string) {
@@ -185,6 +217,9 @@ export default function TablesPage() {
     return i >= 0 ? i + 1 : null;
   })();
   const activeName = `${activeTableLabel} · Bill${activeOrdinal ? ' ' + activeOrdinal : ''}`;
+  const activeOpenedAt = tiles
+    .flatMap((t) => t.openBills)
+    .find((b) => b.id === activeBillId)?.opened_at;
 
   return (
     <div className="flex h-full gap-3">
@@ -226,6 +261,10 @@ export default function TablesPage() {
                   (s, b) => s + (b.id === activeBillId ? total : b.total),
                   0
                 );
+                const tilePlates = t.openBills.reduce(
+                  (s, b) => s + (b.id === activeBillId ? livePlates : b.plates || 0),
+                  0
+                );
                 const status =
                   t.openBills.length === 0 ? 'free' : t.openBills.length === 1 ? 'open' : 'multi';
                 const isSelected = selectedTableId === t.id;
@@ -252,7 +291,11 @@ export default function TablesPage() {
                     </button>
                     <div className="text-xl font-bold">{t.label}</div>
                     <div className="text-xs">
-                      {status === 'free' ? 'free' : `${t.openBills.length} open · ₹${tileTotal.toFixed(0)}`}
+                      {status === 'free'
+                        ? 'free'
+                        : `${t.openBills.length} open · ₹${tileTotal.toFixed(0)} · ${
+                            Number.isInteger(tilePlates) ? tilePlates : tilePlates.toFixed(1)
+                          } pl`}
                     </div>
                     <div className="flex flex-wrap gap-1">
                       {t.openBills.map((b, i) => (
@@ -307,6 +350,9 @@ export default function TablesPage() {
                     <div className="text-xs text-stone-500">
                       ₹{(b.id === activeBillId ? total : b.total).toFixed(0)} · {b.meal_type}
                     </div>
+                    <div className="text-[10px] text-stone-400">
+                      open {durLabel(openMinsFrom(b.opened_at, now))}
+                    </div>
                   </button>
                 ))}
                 <button
@@ -351,7 +397,14 @@ export default function TablesPage() {
               <button className="btn-ghost border border-stone-300" onClick={backToOverview}>
                 ← Back
               </button>
-              <div className="font-semibold">{activeName}</div>
+              <div className="font-semibold">
+                {activeName}
+                {activeOpenedAt && (
+                  <span className="ml-2 text-xs font-normal text-stone-500">
+                    · open {durLabel(openMinsFrom(activeOpenedAt, now))}
+                  </span>
+                )}
+              </div>
               <button
                 className="btn-ghost ml-auto text-xs text-red-700"
                 onClick={() => setCancelOpen(true)}

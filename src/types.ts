@@ -29,6 +29,7 @@ export type TableTile = {
     table_id: number;
     token_no: number | null;
     total: number;
+    plates: number;
     opened_at: string;
     meal_type: string;
   }>;

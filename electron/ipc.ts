@@ -353,7 +353,7 @@ export function registerIpc() {
       .all() as Array<{ id: number; label: string; row_no: number; sort_order: number }>;
     const openBills = db
       .prepare(
-        `SELECT id, table_id, token_no, total, opened_at, meal_type
+        `SELECT id, table_id, token_no, total, plates, opened_at, meal_type
          FROM bills WHERE status='open' AND table_id IS NOT NULL
          ORDER BY id`
       )
@@ -362,6 +362,7 @@ export function registerIpc() {
       table_id: number;
       token_no: number | null;
       total: number;
+      plates: number;
       opened_at: string;
       meal_type: string;
     }>;
@@ -1363,6 +1364,19 @@ export function registerIpc() {
       null
     );
 
+    // Average time to complete a dine-in table = minutes from opened_at to
+    // closed_at, over closed dine-in bills in the range.
+    const avgRow = db
+      .prepare(
+        `SELECT AVG((julianday(closed_at) - julianday(opened_at)) * 1440) AS mins
+         FROM bills
+         WHERE status='closed' AND type='dine_in'
+           AND closed_at IS NOT NULL AND closed_at > opened_at
+           AND ${day} >= date(?) AND ${day} <= date(?)`
+      )
+      .get(from, to) as { mins: number | null };
+    const avgDineMins = avgRow.mins != null ? Math.round(avgRow.mins) : null;
+
     return {
       ok: true,
       from,
@@ -1383,6 +1397,8 @@ export function registerIpc() {
         activeDays,
         avgPerDay: activeDays ? +(revenue / activeDays).toFixed(2) : 0,
         avgPerPlate: plates ? +(revenue / plates).toFixed(2) : 0,
+        avgPlatesPerDay: activeDays ? +(plates / activeDays).toFixed(1) : 0,
+        avgDineMins,
         totalCashExpense,
         bestDay: best,
         peakHour: peak,

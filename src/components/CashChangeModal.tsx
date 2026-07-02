@@ -18,21 +18,29 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
     inputRef.current?.select();
   }, []);
 
-  // Only handle the two shortcuts globally. Typing goes through the focused
-  // input below — we must NOT preventDefault digits/Backspace app-wide, or it
-  // looks like the keyboard has stopped responding.
+  const confirm = () => {
+    if (received >= total) onConfirm(received, +(received - total).toFixed(2));
+  };
+
+  // Esc cancels globally. Enter confirms (handled here and on the input) — we do
+  // NOT preventDefault digits/Backspace app-wide, or it looks like the keyboard
+  // has stopped responding.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
         onCancel();
-      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      } else if (e.key === 'Enter') {
+        // Ignore Enter aimed at a denomination button (it should add, not submit).
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'BUTTON') return;
         e.preventDefault();
-        if (received >= total) onConfirm(received, +(received - total).toFixed(2));
+        confirm();
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [received, total, onCancel, onConfirm]);
 
   const change = received - total;
@@ -40,13 +48,14 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
 
   return (
     <div
+      data-modal
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
       onClick={onCancel}
     >
       <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-baseline justify-between">
           <h2 className="text-lg font-semibold">Cash payment</h2>
-          <div className="text-sm text-stone-500">Esc to cancel · Ctrl+Enter to confirm</div>
+          <div className="text-sm text-stone-500">Esc cancel · Enter confirm</div>
         </div>
         <div className="rounded-md bg-stone-100 p-3 text-center">
           <div className="text-xs text-stone-500">Bill total</div>

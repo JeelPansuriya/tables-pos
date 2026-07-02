@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import type { MealType } from '../types';
@@ -10,17 +10,40 @@ function mealForNow(lunchUntilHour: number): MealType {
   return new Date().getHours() < lunchUntilHour ? 'lunch' : 'dinner';
 }
 
+// Persist an in-progress quick bill so switching tabs and coming back resumes it.
+const DRAFT_KEY = 'quickbill_draft_v1';
+function loadDraft(): { items: EditorItem[]; discount: number; mealType?: MealType } | null {
+  try {
+    const s = localStorage.getItem(DRAFT_KEY);
+    if (s) return JSON.parse(s);
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 export default function QuickBillPage() {
   const { menu, settings } = useStore();
-  const [items, setItems] = useState<EditorItem[]>([]);
   const lunchUntil = parseInt(settings.lunch_until_hour || '17', 10) || 17;
-  const [mealType, setMealType] = useState<MealType>(mealForNow(lunchUntil));
+  const draft = loadDraft();
+  const [items, setItems] = useState<EditorItem[]>(draft?.items ?? []);
+  const [mealType, setMealType] = useState<MealType>(draft?.mealType ?? mealForNow(lunchUntil));
   // Quick billing is always a takeaway-type sale (dine-in goes through Tables).
   // Takeaway-specific products live in the menu itself, so no type toggle.
   const type = 'takeaway' as const;
-  const [discount, setDiscount] = useState(0);
+  const [discount, setDiscount] = useState(draft?.discount ?? 0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+
+  // Save/clear the draft as the bill changes (cleared once it's empty/settled).
+  useEffect(() => {
+    try {
+      if (items.length === 0 && !discount) localStorage.removeItem(DRAFT_KEY);
+      else localStorage.setItem(DRAFT_KEY, JSON.stringify({ items, discount, mealType }));
+    } catch {
+      /* ignore */
+    }
+  }, [items, discount, mealType]);
 
   const subtotal = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
   const maxPct = parseFloat(settings.discount_max_pct || '0') || 0;
