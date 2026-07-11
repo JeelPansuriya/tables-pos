@@ -11,7 +11,7 @@ import {
   CartesianGrid,
   Cell,
 } from 'recharts';
-import { supabase, table } from './supabase';
+import { supabase, table, pageAll } from './supabase';
 import type { Bill, BillItem, BillPayment, PreorderPayment, CashCount } from './types';
 import { rangeAnalytics, inr, todayKey, bizDay } from './analytics';
 
@@ -68,28 +68,44 @@ export default function AnalyticsView() {
       const cutoff = new Date(prevFrom + 'T00:00:00');
       cutoff.setDate(cutoff.getDate() - 2);
       const iso = ymd(cutoff) + ' 00:00:00';
-      const [billsRes, payRes, preRes, cashRes] = await Promise.all([
-        supabase
-          .from(table('bills'))
-          .select('id,status,token_no,meal_type,total,plates,discount,opened_at,closed_at,cancelled_at')
-          .in('status', ['closed', 'cancelled'])
-          .gte('closed_at', iso)
-          .limit(20000),
-        supabase.from(table('bill_payments')).select('id,bill_id,amount,mode,received_at').gte('received_at', iso).limit(20000),
-        supabase.from(table('preorder_payments')).select('id,preorder_id,amount,mode,received_at').gte('received_at', iso).limit(20000),
+      const [b, pays, prePaysRows, cashRes] = await Promise.all([
+        pageAll<Bill>((f, t) =>
+          supabase
+            .from(table('bills'))
+            .select('id,status,token_no,meal_type,total,plates,discount,opened_at,closed_at,cancelled_at')
+            .in('status', ['closed', 'cancelled'])
+            .gte('closed_at', iso)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
+        pageAll<BillPayment>((f, t) =>
+          supabase
+            .from(table('bill_payments'))
+            .select('id,bill_id,amount,mode,received_at')
+            .gte('received_at', iso)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
+        pageAll<PreorderPayment>((f, t) =>
+          supabase
+            .from(table('preorder_payments'))
+            .select('id,preorder_id,amount,mode,received_at')
+            .gte('received_at', iso)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
         supabase.from(table('cash_counts')).select('date,counted_cash,note').gte('date', ymd(cutoff)).lte('date', to),
       ]);
-      for (const r of [billsRes, payRes, preRes, cashRes]) if (r.error) throw r.error;
-      const b = (billsRes.data ?? []) as Bill[];
+      if (cashRes.error) throw cashRes.error;
       // Items only for closed bills in the *selected* range (keeps payload small).
       const rangeIds = b
         .filter((x) => x.status === 'closed' && bizDay(x.closed_at) >= from && bizDay(x.closed_at) <= to)
         .map((x) => x.id);
       const it = await chunkedIn<BillItem>(table('bill_items'), 'id,bill_id,name,qty,unit_price,total', 'bill_id', rangeIds);
       setBills(b);
-      setPayments((payRes.data ?? []) as BillPayment[]);
+      setPayments(pays);
       setItems(it);
-      setPrePays((preRes.data ?? []) as PreorderPayment[]);
+      setPrePays(prePaysRows);
       setCashCounts((cashRes.data ?? []) as CashCount[]);
     } catch (e: any) {
       setError(e?.message ?? String(e));

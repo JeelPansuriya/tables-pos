@@ -11,7 +11,7 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from 'recharts';
-import { supabase, table, TIMEZONE } from './supabase';
+import { supabase, table, TIMEZONE, pageAll } from './supabase';
 import type { Bill, BillItem, BillPayment, Preorder, PreorderPayment } from './types';
 import { daySummary, dailyTrend, dayKeyOffset, todayKey, inr, bizDay } from './analytics';
 import AnalyticsView from './AnalyticsView';
@@ -97,47 +97,49 @@ export default function Dashboard({ session }: { session: Session }) {
     setError(null);
     try {
       const cutoff = cutoffIso(WINDOW_DAYS);
-      const [billsRes, payRes, preRes, prePayRes] = await Promise.all([
-        supabase
-          .from(table('bills'))
-          .select(
-            'id,token_no,type,status,table_label,meal_type,customer_name,subtotal,discount,total,plates,opened_at,closed_at,cancelled_at,cancel_reason'
-          )
-          .gte('opened_at', cutoff)
-          .limit(10000),
-        supabase
-          .from(table('bill_payments'))
-          .select('id,bill_id,amount,mode,received_at')
-          .gte('received_at', cutoff)
-          .limit(10000),
-        supabase
-          .from(table('preorders'))
-          .select('id,customer_name,for_date,total,advance_paid,balance_due,status,created_at')
-          .gte('created_at', cutoff)
-          .limit(10000),
-        supabase
-          .from(table('preorder_payments'))
-          .select('id,preorder_id,amount,mode,received_at')
-          .gte('received_at', cutoff)
-          .limit(10000),
+      const [bills, payments, preorders, preorderPayments] = await Promise.all([
+        pageAll<Bill>((f, t) =>
+          supabase
+            .from(table('bills'))
+            .select(
+              'id,token_no,type,status,table_label,meal_type,customer_name,subtotal,discount,total,plates,opened_at,closed_at,cancelled_at,cancel_reason'
+            )
+            .gte('opened_at', cutoff)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
+        pageAll<BillPayment>((f, t) =>
+          supabase
+            .from(table('bill_payments'))
+            .select('id,bill_id,amount,mode,received_at')
+            .gte('received_at', cutoff)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
+        pageAll<Preorder>((f, t) =>
+          supabase
+            .from(table('preorders'))
+            .select('id,customer_name,for_date,total,advance_paid,balance_due,status,created_at')
+            .gte('created_at', cutoff)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
+        pageAll<PreorderPayment>((f, t) =>
+          supabase
+            .from(table('preorder_payments'))
+            .select('id,preorder_id,amount,mode,received_at')
+            .gte('received_at', cutoff)
+            .order('id', { ascending: false })
+            .range(f, t)
+        ),
       ]);
-      for (const r of [billsRes, payRes, preRes, prePayRes]) {
-        if (r.error) throw r.error;
-      }
-      const bills = (billsRes.data ?? []) as Bill[];
       const items = await chunkedIn<BillItem>(
         table('bill_items'),
         'id,bill_id,name,qty,unit_price,total',
         'bill_id',
         bills.map((b) => b.id)
       );
-      setData({
-        bills,
-        payments: (payRes.data ?? []) as BillPayment[],
-        items,
-        preorders: (preRes.data ?? []) as Preorder[],
-        preorderPayments: (prePayRes.data ?? []) as PreorderPayment[],
-      });
+      setData({ bills, payments, items, preorders, preorderPayments });
       setLastLoadedAt(Date.now());
     } catch (e: any) {
       setError(e?.message ?? String(e));
