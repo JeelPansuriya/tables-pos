@@ -70,6 +70,24 @@ export default function SettingsPage() {
     setMsg(r?.ok ? `Recomputed plate counts for ${r.updated} bills.` : r?.error || 'Failed');
   }
 
+  const [resyncing, setResyncing] = useState(false);
+  async function doResyncAll() {
+    setResyncing(true);
+    setMsg('Uploading all history to the cloud… this can take a minute.');
+    const r = await api.cloud.resyncAll();
+    setResyncing(false);
+    if (r?.ok) {
+      setMsg(
+        `Uploaded ${r.uploaded} record(s) to the cloud.${
+          r.remaining ? ` ${r.remaining} still pending — run again.` : ''
+        }`
+      );
+      await refreshCloud();
+    } else {
+      setMsg(r?.error || 'Re-upload failed');
+    }
+  }
+
   async function doRestore() {
     setRestoreOpen(false);
     setRestoring(true);
@@ -289,6 +307,14 @@ export default function SettingsPage() {
               <div className="flex flex-wrap gap-2">
                 <button className="btn-primary w-fit" onClick={doSync} disabled={syncing || !cloud.enabled}>
                   {syncing ? 'Syncing…' : 'Sync now'}
+                </button>
+                <button
+                  className="btn-ghost w-fit border border-stone-300"
+                  onClick={doResyncAll}
+                  disabled={resyncing || !cloud.enabled}
+                  title="Push the full local history to the cloud — use once to backfill old sales into the dashboard"
+                >
+                  {resyncing ? 'Uploading…' : 'Re-upload all history'}
                 </button>
                 <button
                   className="btn-ghost w-fit border border-rose-300 text-rose-700"

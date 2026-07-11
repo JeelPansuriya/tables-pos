@@ -40,6 +40,12 @@ so add **SELECT policies for the `authenticated` role** and create a viewer acco
    set an email + password (this is what you'll type into the dashboard). Optionally turn
    off public sign-ups under Authentication → Providers so only you can add viewers.
 
+3. **Analytics aggregate function**: run [`analytics-rpc.sql`](analytics-rpc.sql) in the SQL
+   editor. The Analytics tab calls this `v2_analytics(from, to, tz)` function, which does all
+   the aggregation server-side and returns a small JSON blob — so any date range stays fast
+   and well inside the free egress limit, no matter how much data accumulates. Re-run it
+   after pulling updates to this file.
+
 ## Local development
 
 ```sh

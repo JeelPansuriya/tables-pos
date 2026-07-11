@@ -191,6 +191,7 @@ const api = {
   cloud: {
     pushPending: () => invoke('cloud:pushPending'),
     pullSnapshot: () => invoke('cloud:pullSnapshot'),
+    resyncAll: () => invoke('cloud:resyncAll'),
     status: () => invoke('cloud:status'),
   },
   backup: {

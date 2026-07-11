@@ -18,7 +18,7 @@ import {
   printTestSlip,
   type SlipShop,
 } from './printer';
-import { cloudStatus, scheduleSoon, syncPending, pullAndOverride } from './sync';
+import { cloudStatus, scheduleSoon, syncPending, pullAndOverride, pendingCount } from './sync';
 
 type MealType = 'lunch' | 'dinner';
 type PaymentMode = 'cash' | 'upi' | 'card' | 'other';
@@ -1528,5 +1528,31 @@ export function registerIpc() {
     const r = await pullAndOverride();
     if (r.ok) logAudit(db, 'cloud.restore', { details: { counts: r.counts } });
     return r;
+  });
+
+  // Admin: re-upload the ENTIRE local history to the cloud (e.g. to backfill
+  // sales from before cloud sync was set up, so the dashboard/analytics show
+  // them). Marks all terminal bills, pre-orders and cash counts pending, then
+  // drains the sync queue in batches. Uploads only — doesn't affect read egress.
+  ipcMain.handle('cloud:resyncAll', async () => {
+    requireAdmin();
+    const cfg = cloudStatus();
+    if (!cfg.configured)
+      return { ok: false, error: 'Supabase URL/key not set. Add them and enable cloud sync first.' };
+    db.exec(
+      `UPDATE bills SET sync_status='pending' WHERE status IN ('closed','cancelled');
+       UPDATE preorders SET sync_status='pending';
+       UPDATE cash_counts SET sync_status='pending';`
+    );
+    const target = pendingCount();
+    let iterations = 0;
+    while (pendingCount() > 0 && iterations < 500) {
+      const r = await syncPending();
+      if (!r.ok) return { ok: false, error: r.reason || 'Sync failed', remaining: pendingCount() };
+      iterations++;
+    }
+    const remaining = pendingCount();
+    logAudit(db, 'cloud.resyncAll', { details: { queued: target, remaining } });
+    return { ok: true, uploaded: target - remaining, remaining };
   });
 }

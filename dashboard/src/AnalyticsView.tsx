@@ -11,9 +11,38 @@ import {
   CartesianGrid,
   Cell,
 } from 'recharts';
-import { supabase, table, pageAll } from './supabase';
-import type { Bill, BillItem, BillPayment, PreorderPayment, CashCount } from './types';
-import { rangeAnalytics, inr, todayKey, bizDay } from './analytics';
+import { supabase, TIMEZONE } from './supabase';
+import { inr, todayKey } from './analytics';
+
+// The analytics data is aggregated server-side by the v2_analytics RPC, so any
+// range returns a small payload regardless of volume (see dashboard/analytics-rpc.sql).
+type RpcResult = {
+  from: string;
+  to: string;
+  daily: Array<{ date: string; billRevenue: number; preorder: number; bills: number; plates: number }>;
+  byHour: Array<{ hour: number; bills: number; revenue: number }>;
+  byWeekday: Array<{ dow: number; bills: number; revenue: number }>;
+  byMode: Array<{ mode: string; amt: number }>;
+  topItems: Array<{ name: string; qty: number; revenue: number }>;
+  slowItems: Array<{ name: string; qty: number; revenue: number }>;
+  cashDaily: Array<{ date: string; collected: number }>;
+  counts: Array<{ date: string; counted: number; note: string | null }>;
+  totals: {
+    billRevenue: number;
+    plates: number;
+    bills: number;
+    preorderCollected: number;
+    activeDays: number;
+    voidsCount: number;
+    voidsTotal: number;
+    discounts: number;
+    avgDineMins: number | null;
+    bestDay: { date: string; revenue: number } | null;
+    peakHour: { hour: number; revenue: number } | null;
+    prevTotalCollected: number;
+    mtdTotalCollected: number;
+  };
+};
 
 function ymd(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
@@ -25,157 +54,92 @@ function addDays(key: string, n: number): string {
   d.setDate(d.getDate() + n);
   return ymd(d);
 }
-function diffDays(from: string, to: string): number {
-  return Math.round((new Date(to + 'T00:00:00').getTime() - new Date(from + 'T00:00:00').getTime()) / 86400000) + 1;
-}
 const hourLabel = (h: number) => `${String(h).padStart(2, '0')}:00`;
 const monthLabel = (m: string) =>
   new Date(m + '-01T00:00:00').toLocaleString('en-US', { month: 'short', year: '2-digit' });
 const MODE_HEX: Record<string, string> = { cash: '#059669', upi: '#0284c7', card: '#7c3aed', other: '#78716c' };
 const pct = (cur: number, prev: number): number | null => (prev > 0 ? +(((cur - prev) / prev) * 100).toFixed(1) : null);
-
-async function chunkedIn<T>(tbl: string, cols: string, column: string, ids: number[]): Promise<T[]> {
-  const out: T[] = [];
-  for (let i = 0; i < ids.length; i += 200) {
-    const { data, error } = await supabase.from(tbl).select(cols).in(column, ids.slice(i, i + 200));
-    if (error) throw error;
-    if (data) out.push(...(data as T[]));
-  }
-  return out;
-}
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function AnalyticsView() {
   const [to, setTo] = useState(todayKey());
   const [from, setFrom] = useState(() => addDays(todayKey(), -29));
-  const [bills, setBills] = useState<Bill[]>([]);
-  const [payments, setPayments] = useState<BillPayment[]>([]);
-  const [items, setItems] = useState<BillItem[]>([]);
-  const [prePays, setPrePays] = useState<PreorderPayment[]>([]);
-  const [cashCounts, setCashCounts] = useState<CashCount[]>([]);
+  const [res, setRes] = useState<RpcResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const rangeLen = diffDays(from, to);
-  const prevFrom = addDays(from, -rangeLen);
-  const prevTo = addDays(from, -1);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Fetch a window covering the selected range + the equal previous period
-      // (for growth %), with a couple days' slack for cash carry-over.
-      const cutoff = new Date(prevFrom + 'T00:00:00');
-      cutoff.setDate(cutoff.getDate() - 2);
-      const iso = ymd(cutoff) + ' 00:00:00';
-      const [b, pays, prePaysRows, cashRes] = await Promise.all([
-        pageAll<Bill>((f, t) =>
-          supabase
-            .from(table('bills'))
-            .select('id,status,token_no,meal_type,total,plates,discount,opened_at,closed_at,cancelled_at')
-            .in('status', ['closed', 'cancelled'])
-            .gte('closed_at', iso)
-            .order('id', { ascending: false })
-            .range(f, t)
-        ),
-        pageAll<BillPayment>((f, t) =>
-          supabase
-            .from(table('bill_payments'))
-            .select('id,bill_id,amount,mode,received_at')
-            .gte('received_at', iso)
-            .order('id', { ascending: false })
-            .range(f, t)
-        ),
-        pageAll<PreorderPayment>((f, t) =>
-          supabase
-            .from(table('preorder_payments'))
-            .select('id,preorder_id,amount,mode,received_at')
-            .gte('received_at', iso)
-            .order('id', { ascending: false })
-            .range(f, t)
-        ),
-        supabase.from(table('cash_counts')).select('date,counted_cash,note').gte('date', ymd(cutoff)).lte('date', to),
-      ]);
-      if (cashRes.error) throw cashRes.error;
-      // Items only for closed bills in the *selected* range (keeps payload small).
-      const rangeIds = b
-        .filter((x) => x.status === 'closed' && bizDay(x.closed_at) >= from && bizDay(x.closed_at) <= to)
-        .map((x) => x.id);
-      const it = await chunkedIn<BillItem>(table('bill_items'), 'id,bill_id,name,qty,unit_price,total', 'bill_id', rangeIds);
-      setBills(b);
-      setPayments(pays);
-      setItems(it);
-      setPrePays(prePaysRows);
-      setCashCounts((cashRes.data ?? []) as CashCount[]);
+      const { data, error } = await supabase.rpc('v2_analytics', { p_from: from, p_to: to, p_tz: TIMEZONE });
+      if (error) throw error;
+      setRes(data as RpcResult);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
-  }, [from, to, prevFrom]);
+  }, [from, to]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const a = useMemo(
-    () => rangeAnalytics(from, to, bills, payments, items, prePays, cashCounts),
-    [from, to, bills, payments, items, prePays, cashCounts]
-  );
-  const prev = useMemo(
-    () => rangeAnalytics(prevFrom, prevTo, bills, payments, [], prePays, cashCounts),
-    [prevFrom, prevTo, bills, payments, prePays, cashCounts]
-  );
+  const t = res?.totals;
+  const totalCollected = t ? +(t.billRevenue + t.preorderCollected).toFixed(2) : 0;
+  const growth = t ? pct(totalCollected, t.prevTotalCollected) : null;
+  const avgPerDay = t && t.activeDays ? +(t.billRevenue / t.activeDays).toFixed(2) : 0;
+  const avgPerPlate = t && t.plates ? +(t.billRevenue / t.plates).toFixed(2) : 0;
+  const avgPlatesPerDay = t && t.activeDays ? +(t.plates / t.activeDays).toFixed(1) : 0;
 
-  // Voids (token-bearing cancelled) + discounts in the selected range.
-  const voids = useMemo(() => {
-    const inRange = (k: string) => k >= from && k <= to;
-    const v = bills.filter(
-      (b) => b.status === 'cancelled' && b.token_no != null && inRange(bizDay(b.cancelled_at || b.closed_at))
-    );
-    return { count: v.length, total: v.reduce((s, b) => s + b.total, 0) };
-  }, [bills, from, to]);
+  const byMode = useMemo(() => {
+    const m: Record<string, number> = { cash: 0, upi: 0, card: 0, other: 0 };
+    (res?.byMode ?? []).forEach((x) => (m[x.mode] = x.amt));
+    return m;
+  }, [res]);
 
-  const discounts = useMemo(() => {
-    const inRange = (k: string) => k >= from && k <= to;
-    return bills
-      .filter((b) => b.status === 'closed' && inRange(bizDay(b.closed_at)))
-      .reduce((s, b) => s + (b.discount || 0), 0);
-  }, [bills, from, to]);
+  // Daily cash + counted close + expense (baseline: no expense on the first day
+  // counted, since there's no previous close to compare).
+  const cash = useMemo(() => {
+    if (!res) return [] as Array<{ date: string; collected: number; counted: number | null; expense: number | null }>;
+    const coll = new Map(res.cashDaily.map((c) => [c.date, c.collected]));
+    const counted = new Map(res.counts.map((c) => [c.date, c.counted]));
+    const dates = new Set<string>();
+    res.cashDaily.forEach((c) => dates.add(c.date));
+    res.counts.forEach((c) => {
+      if (c.date >= from) dates.add(c.date);
+    });
+    return [...dates].sort().map((date) => {
+      const collected = +(coll.get(date) ?? 0).toFixed(2);
+      const c = counted.has(date) ? counted.get(date)! : null;
+      const prev = counted.has(addDays(date, -1)) ? counted.get(addDays(date, -1))! : null;
+      const expense = c != null && prev != null ? +(prev + collected - c).toFixed(2) : null;
+      return { date, collected, counted: c, expense };
+    });
+  }, [res, from]);
+  const totalCashExpense = +cash.reduce((s, c) => s + (c.expense ?? 0), 0).toFixed(2);
+  const noteByDate = new Map((res?.counts ?? []).map((c) => [c.date, c.note || '']));
 
-  // Month-to-date for the month containing `to`.
-  const mtd = useMemo(() => {
-    const monthStart = to.slice(0, 7) + '-01';
-    const inMtd = (k: string) => k >= monthStart && k <= to;
-    const billRev = bills
-      .filter((b) => b.status === 'closed' && inMtd(bizDay(b.closed_at)))
-      .reduce((s, b) => s + b.total, 0);
-    const pre = prePays.filter((p) => inMtd(bizDay(p.received_at))).reduce((s, p) => s + p.amount, 0);
-    return billRev + pre;
-  }, [bills, prePays, to]);
-
-  // Monthly revenue across the fetched window (a few months).
   const monthly = useMemo(() => {
     const m = new Map<string, number>();
-    for (const b of bills) {
-      if (b.status !== 'closed') continue;
-      const key = bizDay(b.closed_at).slice(0, 7);
-      if (!key) continue;
-      m.set(key, (m.get(key) ?? 0) + b.total);
-    }
-    return [...m.entries()].sort().map(([month, revenue]) => ({ month, label: monthLabel(month), revenue: Math.round(revenue) }));
-  }, [bills]);
+    (res?.daily ?? []).forEach((d) => {
+      const k = d.date.slice(0, 7);
+      m.set(k, (m.get(k) ?? 0) + d.billRevenue);
+    });
+    return [...m.entries()].sort().map(([month, rev]) => ({ month, label: monthLabel(month), revenue: Math.round(rev) }));
+  }, [res]);
 
-  // Slow items (lowest sellers) among items sold in range.
-  const slowItems = useMemo(() => [...a.topItems].sort((x, y) => x.qty - y.qty).slice(0, 8), [a.topItems]);
-
-  const peakHour = a.totals.peakHour?.hour ?? -1;
-  const hourData = a.byHour.map((h) => ({ ...h, label: hourLabel(h.hour) }));
-  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const weekdayData = WEEKDAYS.map((label, dow) => ({ label, revenue: a.byWeekday.find((x) => x.dow === dow)?.revenue ?? 0 }));
-  const modeTotal = (Object.values(a.byMode) as number[]).reduce((s, n) => s + n, 0) || 1;
-  const noteByDate = new Map(cashCounts.map((c) => [c.date, c.note || '']));
-  const growth = pct(a.totals.totalCollected, prev.totals.totalCollected);
+  const peakHour = t?.peakHour?.hour ?? -1;
+  const hourData = (res?.byHour ?? []).map((h) => ({ ...h, label: hourLabel(h.hour) }));
+  const weekdayData = WEEKDAYS.map((label, dow) => ({
+    label,
+    revenue: (res?.byWeekday ?? []).find((x) => x.dow === dow)?.revenue ?? 0,
+  }));
+  const modeTotal = (Object.values(byMode) as number[]).reduce((s, n) => s + n, 0) || 1;
+  const rangeLen = Math.round((new Date(to).getTime() - new Date(from).getTime()) / 86400000) + 1;
+  const prevFrom = addDays(from, -rangeLen);
+  const prevTo = addDays(from, -1);
 
   function preset(days: number) {
     setFrom(addDays(todayKey(), -(days - 1)));
@@ -198,25 +162,24 @@ export default function AnalyticsView() {
       </div>
 
       {error && <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
-      {loading && !bills.length ? (
+      {loading && !res ? (
         <div className="py-16 text-center text-stone-400">Loading analytics…</div>
-      ) : (
+      ) : res && t ? (
         <>
           <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Stat
-              label="Total collected"
-              value={inr(a.totals.totalCollected)}
-              accent
-              sub={`bills ${inr(a.totals.billRevenue)} · pre ${inr(a.totals.preorderCollected)}`}
-              delta={growth}
-            />
-            <Stat label="vs prev period" value={inr(prev.totals.totalCollected)} sub={`${prevFrom.slice(5)}–${prevTo.slice(5)}`} />
-            <Stat label="Month-to-date" value={inr(mtd)} />
-            <Stat label="Cash expense" value={inr(a.totals.totalCashExpense)} tone="rose" />
-            <Stat label="Avg / day" value={inr(a.totals.avgPerDay)} />
-            <Stat label="Avg / plate" value={inr(a.totals.avgPerPlate)} />
-            <Stat label="Voids" value={String(voids.count)} sub={inr(voids.total)} tone={voids.count ? 'rose' : undefined} />
-            <Stat label="Discounts" value={inr(discounts)} />
+            <Stat label="Total collected" value={inr(totalCollected)} accent
+              sub={`bills ${inr(t.billRevenue)} · pre ${inr(t.preorderCollected)}`} delta={growth} />
+            <Stat label="vs prev period" value={inr(t.prevTotalCollected)} sub={`${prevFrom.slice(5)}–${prevTo.slice(5)}`} />
+            <Stat label="Month-to-date" value={inr(t.mtdTotalCollected)} />
+            <Stat label="Cash expense" value={inr(totalCashExpense)} tone="rose" />
+            <Stat label="Avg / day" value={inr(avgPerDay)} />
+            <Stat label="Avg / plate" value={inr(avgPerPlate)} />
+            <Stat label="Avg plates / day" value={String(avgPlatesPerDay)} />
+            <Stat label="Avg dine-in time" value={t.avgDineMins == null ? '—' : t.avgDineMins < 60 ? `${t.avgDineMins}m` : `${Math.floor(t.avgDineMins / 60)}h ${t.avgDineMins % 60}m`} sub="open → closed" />
+            <Stat label="Total plates" value={String(t.plates)} />
+            <Stat label="Voids" value={String(t.voidsCount)} sub={inr(t.voidsTotal)} tone={t.voidsCount ? 'rose' : undefined} />
+            <Stat label="Discounts" value={inr(t.discounts)} />
+            <Stat label="Best day" value={t.bestDay ? inr(t.bestDay.revenue) : '—'} sub={t.bestDay?.date.slice(5)} />
           </section>
 
           <div className="card p-4">
@@ -225,9 +188,9 @@ export default function AnalyticsView() {
               <span className="text-xs text-stone-500"><span style={{ color: '#0f766e' }}>●</span> bills</span>
               <span className="text-xs text-stone-500"><span style={{ color: '#7c3aed' }}>●</span> pre-orders</span>
             </div>
-            {a.daily.length ? (
+            {res.daily.length ? (
               <ResponsiveContainer width="100%" height={230}>
-                <LineChart data={a.daily}>
+                <LineChart data={res.daily}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="date" fontSize={11} tickFormatter={(d) => d.slice(5)} />
                   <YAxis fontSize={12} tickFormatter={(v) => '₹' + v} />
@@ -297,14 +260,14 @@ export default function AnalyticsView() {
               <h2 className="mb-2 text-sm font-semibold text-stone-700">Payment modes</h2>
               <div className="space-y-2">
                 {(['cash', 'upi', 'card', 'other'] as const)
-                  .filter((m) => a.byMode[m] > 0)
+                  .filter((m) => byMode[m] > 0)
                   .map((m) => {
-                    const p = Math.round((a.byMode[m] / modeTotal) * 100);
+                    const p = Math.round((byMode[m] / modeTotal) * 100);
                     return (
                       <div key={m} className="text-sm">
                         <div className="mb-0.5 flex justify-between">
                           <span className="capitalize" style={{ color: MODE_HEX[m] }}>● {m}</span>
-                          <span className="tabular-nums font-medium">{inr(a.byMode[m])} <span className="text-stone-400">· {p}%</span></span>
+                          <span className="tabular-nums font-medium">{inr(byMode[m])} <span className="text-stone-400">· {p}%</span></span>
                         </div>
                         <div className="h-2 w-full rounded bg-stone-100">
                           <div className="h-2 rounded" style={{ width: `${p}%`, background: MODE_HEX[m] }} />
@@ -319,10 +282,10 @@ export default function AnalyticsView() {
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             <div className="card p-4">
               <h2 className="mb-2 text-sm font-semibold text-stone-700">Top items</h2>
-              {a.topItems.length ? (
+              {res.topItems.length ? (
                 <table className="w-full text-sm">
                   <tbody>
-                    {a.topItems.slice(0, 10).map((it) => (
+                    {res.topItems.slice(0, 10).map((it) => (
                       <tr key={it.name} className="border-t border-stone-100">
                         <td className="py-1.5">{it.name}</td>
                         <td className="py-1.5 text-right tabular-nums text-stone-500">×{it.qty}</td>
@@ -339,10 +302,10 @@ export default function AnalyticsView() {
               <h2 className="mb-2 text-sm font-semibold text-stone-700">
                 Slow movers <span className="font-normal text-stone-400">(lowest sellers)</span>
               </h2>
-              {slowItems.length ? (
+              {res.slowItems.length ? (
                 <table className="w-full text-sm">
                   <tbody>
-                    {slowItems.map((it) => (
+                    {res.slowItems.map((it) => (
                       <tr key={it.name} className="border-t border-stone-100">
                         <td className="py-1.5">{it.name}</td>
                         <td className="py-1.5 text-right tabular-nums text-stone-500">×{it.qty}</td>
@@ -359,7 +322,7 @@ export default function AnalyticsView() {
 
           <div className="card p-4">
             <h2 className="mb-2 text-sm font-semibold text-stone-700">Daily cash &amp; expense</h2>
-            {a.cash.length ? (
+            {cash.length ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead className="text-left text-stone-500">
@@ -372,7 +335,7 @@ export default function AnalyticsView() {
                     </tr>
                   </thead>
                   <tbody>
-                    {a.cash.map((c) => (
+                    {cash.map((c) => (
                       <tr key={c.date} className="border-t border-stone-100">
                         <td className="p-1">{c.date.slice(5)}</td>
                         <td className="p-1 text-right tabular-nums text-emerald-700">{inr(c.collected)}</td>
@@ -393,26 +356,14 @@ export default function AnalyticsView() {
             )}
           </div>
         </>
+      ) : (
+        <Empty>No data</Empty>
       )}
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-  sub,
-  accent,
-  tone,
-  delta,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  accent?: boolean;
-  tone?: 'rose';
-  delta?: number | null;
-}) {
+function Stat({ label, value, sub, accent, tone, delta }: { label: string; value: string; sub?: string; accent?: boolean; tone?: 'rose'; delta?: number | null }) {
   const color = tone === 'rose' ? 'text-rose-700' : accent ? 'text-brand-700' : 'text-stone-800';
   return (
     <div className={`stat ${accent ? 'ring-1 ring-brand-200' : ''}`}>
