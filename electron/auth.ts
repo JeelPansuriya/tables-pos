@@ -28,6 +28,40 @@ export function requireAdmin(): NonNullable<Session> {
   return s;
 }
 
+// Persistent login: remember the last signed-in user so the app reopens
+// straight into their session instead of the login screen each launch.
+const SESSION_KEY = 'session_user_id';
+
+function persistSessionUser(db: Database, userId: number | null) {
+  if (userId == null) {
+    db.prepare(`DELETE FROM settings WHERE key=?`).run(SESSION_KEY);
+  } else {
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+    ).run(SESSION_KEY, String(userId));
+  }
+}
+
+/** Restore the remembered session at startup (if that user still exists & is active). */
+export function restoreSession(db: Database) {
+  const s = db.prepare(`SELECT value FROM settings WHERE key=?`).get(SESSION_KEY) as
+    | { value?: string }
+    | undefined;
+  const id = s?.value ? parseInt(s.value, 10) : NaN;
+  if (!id || isNaN(id)) return;
+  const row = db
+    .prepare(`SELECT id, username, role, active FROM users WHERE id=?`)
+    .get(id) as { id: number; username: string; role: 'manager' | 'admin'; active: number } | undefined;
+  if (row && row.active) session = { userId: row.id, username: row.username, role: row.role };
+}
+
+/** Forget the remembered session (called on explicit logout). */
+export function forgetSession(db: Database) {
+  persistSessionUser(db, null);
+  session = null;
+}
+
 export function hashPassword(pw: string): string {
   return bcrypt.hashSync(pw, 10);
 }
@@ -51,6 +85,7 @@ export function login(db: Database, username: string, password: string): Session
   if (!row || !row.active) return null;
   if (!verifyPassword(password, row.password_hash)) return null;
   session = { userId: row.id, username: row.username, role: row.role };
+  persistSessionUser(db, row.id);
   return session;
 }
 

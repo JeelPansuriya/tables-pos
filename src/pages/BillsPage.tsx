@@ -188,6 +188,7 @@ export default function BillsPage() {
               <th className="p-2">Token</th>
               <th className="p-2">When</th>
               <th className="p-2">Type</th>
+              <th className="p-2">Meal</th>
               <th className="p-2">Table</th>
               <th className="p-2">Customer</th>
               <th className="p-2">Total</th>
@@ -211,6 +212,21 @@ export default function BillsPage() {
                 </td>
                 <td className="p-2">{fmtDateTime(r.closed_at || r.opened_at)}</td>
                 <td className="p-2">{r.type}</td>
+                <td className="p-2">
+                  {r.meal_type ? (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-xs font-medium capitalize ${
+                        r.meal_type === 'lunch'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-indigo-100 text-indigo-800'
+                      }`}
+                    >
+                      {r.meal_type}
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td className="p-2">{r.table_label ?? '—'}</td>
                 <td className="p-2">{r.customer_name ?? '—'}</td>
                 <td className="p-2 font-medium">₹{r.total.toFixed(2)}</td>
@@ -271,7 +287,7 @@ export default function BillsPage() {
               </tr>
               {expandedId === r.id && (
                 <tr className="border-t border-stone-100 bg-stone-50/60">
-                  <td colSpan={9} className="px-4 py-3">
+                  <td colSpan={10} className="px-4 py-3">
                     {details[r.id] ? (
                       <div className="grid gap-3 sm:grid-cols-[1fr_16rem]">
                         <div>
@@ -324,7 +340,7 @@ export default function BillsPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={9} className="p-4 text-center text-stone-500">
+                <td colSpan={10} className="p-4 text-center text-stone-500">
                   No bills in range.
                 </td>
               </tr>

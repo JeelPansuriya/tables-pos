@@ -62,10 +62,10 @@ const hourLabel = (h: number) => `${String(h).padStart(2, '0')}:00`;
 export default function AnalyticsPage() {
   const today = ymd(new Date());
   const [to, setTo] = useState(today);
+  // Default to the current month so the headline is "this month's revenue".
   const [from, setFrom] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 29);
-    return ymd(d);
+    const n = new Date();
+    return ymd(new Date(n.getFullYear(), n.getMonth(), 1));
   });
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);

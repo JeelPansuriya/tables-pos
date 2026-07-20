@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { PaymentMode } from '../types';
 import CashChangeModal from './CashChangeModal';
+import NumberField from './NumberField';
 
 export type PaymentEntry = {
   amount: number;
@@ -120,11 +121,12 @@ export default function PaymentBar({
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="text-xs text-stone-600">Cash part</label>
-            <input
+            <NumberField
               className="input"
-              type="number"
+              min={0}
               value={cashPart}
-              onChange={(e) => setCashPart(parseFloat(e.target.value) || 0)}
+              onChange={setCashPart}
+              placeholder="0"
             />
           </div>
           <div>

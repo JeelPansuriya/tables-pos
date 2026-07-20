@@ -2,13 +2,13 @@ import { ipcMain, dialog, BrowserWindow } from 'electron';
 import type { Database } from 'better-sqlite3';
 import { getDb, backupDatabase } from './db';
 import {
+  forgetSession,
   getSession,
   hashPassword,
   login,
   logAudit,
   requireAdmin,
   requireSession,
-  setSession,
   verifyPassword,
 } from './auth';
 import {
@@ -18,7 +18,7 @@ import {
   printTestSlip,
   type SlipShop,
 } from './printer';
-import { cloudStatus, scheduleSoon, syncPending, pullAndOverride, pendingCount } from './sync';
+import { cloudStatus, scheduleSoon, syncPending, pullAndOverride, pullAndMerge, pendingCount } from './sync';
 
 type MealType = 'lunch' | 'dinner';
 type PaymentMode = 'cash' | 'upi' | 'card' | 'other';
@@ -160,7 +160,7 @@ export function registerIpc() {
   });
 
   ipcMain.handle('auth:logout', () => {
-    setSession(null);
+    forgetSession(db);
     return { ok: true };
   });
 
@@ -386,12 +386,18 @@ export function registerIpc() {
   ipcMain.handle('tables:newBill', (_e, { tableId, mealType }) => {
     requireSession();
     const meal: MealType = mealType ?? defaultMealForNow(db);
+    // The Counter is a walk-in station, so its sales are takeaway — this keeps
+    // them out of dine-in timing analytics (we don't track time for it).
+    const label = (db.prepare(`SELECT label FROM tables WHERE id=?`).get(tableId) as
+      | { label?: string }
+      | undefined)?.label;
+    const type = label === 'Counter' ? 'takeaway' : 'dine_in';
     const r = db
       .prepare(
         `INSERT INTO bills (type, status, table_id, meal_type, created_by_user_id)
-         VALUES ('dine_in', 'open', ?, ?, ?)`
+         VALUES (?, 'open', ?, ?, ?)`
       )
-      .run(tableId, meal, getSession()?.userId ?? null);
+      .run(type, tableId, meal, getSession()?.userId ?? null);
     const billId = Number(r.lastInsertRowid);
     return { ok: true, bill: getBillForSlip(db, billId) };
   });
@@ -1253,6 +1259,171 @@ export function registerIpc() {
     return { ok: true };
   });
 
+  // -------- MONEY TRACKER --------
+  // Money collected on day `d` for a payment mode: closed bills (by close day) +
+  // pre-order payments (by received day).
+  function collectedByMode(d: string, mode: PaymentMode): number {
+    const bill = (db
+      .prepare(
+        `SELECT COALESCE(SUM(bp.amount),0) AS a FROM bill_payments bp
+         JOIN bills b ON b.id=bp.bill_id
+         WHERE b.status='closed' AND bp.mode=? AND date(b.closed_at,'localtime')=?`
+      )
+      .get(mode, d) as { a: number }).a;
+    const pre = (db
+      .prepare(
+        `SELECT COALESCE(SUM(amount),0) AS a FROM preorder_payments
+         WHERE mode=? AND date(received_at,'localtime')=?`
+      )
+      .get(mode, d) as { a: number }).a;
+    return +(bill + pre).toFixed(2);
+  }
+
+  // Per-day money view: what was collected (from sales) vs the expenses the
+  // manager entered, plus the derived cash-in-hand and net.
+  ipcMain.handle('money:get', (_e, date?: string) => {
+    requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const cashCollected = collectedByMode(d, 'cash');
+    const upiCollected = collectedByMode(d, 'upi');
+    const cardCollected = collectedByMode(d, 'card');
+    const otherCollected = collectedByMode(d, 'other');
+    const row = db
+      .prepare(`SELECT cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at FROM day_expenses WHERE date=?`)
+      .get(d) as
+      | { cash_expense: number; upi_expense: number; cash_extra: number; upi_extra: number; note: string | null; updated_at: string }
+      | undefined;
+    const cashExpense = row?.cash_expense ?? 0;
+    const upiExpense = row?.upi_expense ?? 0;
+    const cashExtra = row?.cash_extra ?? 0; // extra cash in, outside a bill
+    const upiExtra = row?.upi_extra ?? 0;
+    // Total money in = sales collected (all modes) + the manual extras.
+    const totalCollected = +(cashCollected + upiCollected + cardCollected + otherCollected + cashExtra + upiExtra).toFixed(2);
+    return {
+      ok: true,
+      date: d,
+      saved: !!row,
+      cashCollected,
+      upiCollected,
+      cardCollected,
+      otherCollected,
+      cashExtra,
+      upiExtra,
+      totalCollected,
+      cashExpense,
+      upiExpense,
+      note: row?.note ?? '',
+      updatedAt: row?.updated_at ?? null,
+      // Cash physically in hand: sales cash + extra cash − cash spending.
+      cashInHand: +(cashCollected + cashExtra - cashExpense).toFixed(2),
+      // Overall net after all expenses (extras already fold into totalCollected).
+      net: +(totalCollected - cashExpense - upiExpense).toFixed(2),
+    };
+  });
+
+  ipcMain.handle('money:set', (_e, { date, cash_expense, upi_expense, cash_extra, upi_extra, note }) => {
+    const session = requireSession();
+    const d = date || new Date().toISOString().slice(0, 10);
+    const cash = Math.max(0, parseFloat(cash_expense) || 0);
+    const upi = Math.max(0, parseFloat(upi_expense) || 0);
+    const cashIn = Math.max(0, parseFloat(cash_extra) || 0);
+    const upiIn = Math.max(0, parseFloat(upi_extra) || 0);
+    db.prepare(
+      `INSERT INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_by_user_id, updated_at, sync_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 'pending')
+       ON CONFLICT(date) DO UPDATE SET cash_expense=excluded.cash_expense, upi_expense=excluded.upi_expense,
+         cash_extra=excluded.cash_extra, upi_extra=excluded.upi_extra,
+         note=excluded.note, updated_by_user_id=excluded.updated_by_user_id, updated_at=excluded.updated_at,
+         sync_status='pending'`
+    ).run(d, cash, upi, cashIn, upiIn, note || null, session.userId);
+    logAudit(db, 'money.set', { details: { date: d, cash_expense: cash, upi_expense: upi, cash_extra: cashIn, upi_extra: upiIn } });
+    return { ok: true };
+  });
+
+  // History table: collected vs expenses per day over a range (newest first).
+  ipcMain.handle('money:range', (_e, params) => {
+    requireSession();
+    const to = params?.to || new Date().toISOString().slice(0, 10);
+    const from =
+      params?.from ||
+      (() => {
+        const d = new Date(to + 'T00:00:00');
+        d.setDate(d.getDate() - 13);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      })();
+
+    type Agg = {
+      date: string;
+      cashCollected: number;
+      upiCollected: number;
+      otherCollected: number;
+      cashExpense: number;
+      upiExpense: number;
+      note: string;
+    };
+    const map = new Map<string, Agg>();
+    const ensure = (d: string): Agg => {
+      let r = map.get(d);
+      if (!r) {
+        r = { date: d, cashCollected: 0, upiCollected: 0, otherCollected: 0, cashExpense: 0, upiExpense: 0, note: '' };
+        map.set(d, r);
+      }
+      return r;
+    };
+
+    const billRows = db
+      .prepare(
+        `SELECT date(b.closed_at,'localtime') AS d, bp.mode AS mode, COALESCE(SUM(bp.amount),0) AS a
+         FROM bill_payments bp JOIN bills b ON b.id=bp.bill_id
+         WHERE b.status='closed' AND date(b.closed_at,'localtime')>=date(?) AND date(b.closed_at,'localtime')<=date(?)
+         GROUP BY d, mode`
+      )
+      .all(from, to) as Array<{ d: string; mode: string; a: number }>;
+    const preRows = db
+      .prepare(
+        `SELECT date(received_at,'localtime') AS d, mode, COALESCE(SUM(amount),0) AS a
+         FROM preorder_payments
+         WHERE date(received_at,'localtime')>=date(?) AND date(received_at,'localtime')<=date(?)
+         GROUP BY d, mode`
+      )
+      .all(from, to) as Array<{ d: string; mode: string; a: number }>;
+    for (const r of [...billRows, ...preRows]) {
+      const row = ensure(r.d);
+      if (r.mode === 'cash') row.cashCollected += r.a;
+      else if (r.mode === 'upi') row.upiCollected += r.a;
+      else row.otherCollected += r.a;
+    }
+    const expRows = db
+      .prepare(`SELECT date, cash_expense, upi_expense, cash_extra, upi_extra, note FROM day_expenses WHERE date>=? AND date<=?`)
+      .all(from, to) as Array<{ date: string; cash_expense: number; upi_expense: number; cash_extra: number; upi_extra: number; note: string | null }>;
+    for (const r of expRows) {
+      const row = ensure(r.date);
+      row.cashExpense = r.cash_expense;
+      row.upiExpense = r.upi_expense;
+      // Fold the manual extras into that day's cash/UPI "in" so totals & net balance.
+      row.cashCollected += r.cash_extra ?? 0;
+      row.upiCollected += r.upi_extra ?? 0;
+      row.note = r.note ?? '';
+    }
+    const days = Array.from(map.values())
+      .map((r) => {
+        const totalCollected = +(r.cashCollected + r.upiCollected + r.otherCollected).toFixed(2);
+        return {
+          date: r.date,
+          cashCollected: +r.cashCollected.toFixed(2),
+          upiCollected: +r.upiCollected.toFixed(2),
+          otherCollected: +r.otherCollected.toFixed(2),
+          totalCollected,
+          cashExpense: r.cashExpense,
+          upiExpense: r.upiExpense,
+          note: r.note,
+          net: +(totalCollected - r.cashExpense - r.upiExpense).toFixed(2),
+        };
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    return { ok: true, from, to, days };
+  });
+
   // -------- ANALYTICS --------
   // Aggregates over a date range (keyed off the close day) for the Analytics
   // tab: daily series, by-hour (peak hours), weekday, payment modes, top items,
@@ -1530,6 +1701,20 @@ export function registerIpc() {
     return r;
   });
 
+  // Pull down any cloud rows this PC is missing and ADD them (never deletes) —
+  // brings in imported/old history and data created on other devices. Safe for
+  // any signed-in user and safe to run repeatedly. Returns how many rows were
+  // newly added.
+  ipcMain.handle('cloud:pullMerge', async () => {
+    requireSession();
+    const cfg = cloudStatus();
+    if (!cfg.configured)
+      return { ok: false, error: 'Supabase URL/key not set. Add them and enable cloud sync first.' };
+    const r = await pullAndMerge();
+    if (r.ok) logAudit(db, 'cloud.pullMerge', { details: { counts: r.counts } });
+    return r;
+  });
+
   // Admin: re-upload the ENTIRE local history to the cloud (e.g. to backfill
   // sales from before cloud sync was set up, so the dashboard/analytics show
   // them). Marks all terminal bills, pre-orders and cash counts pending, then
@@ -1539,9 +1724,11 @@ export function registerIpc() {
     const cfg = cloudStatus();
     if (!cfg.configured)
       return { ok: false, error: 'Supabase URL/key not set. Add them and enable cloud sync first.' };
+    // Don't re-queue rows pulled from the cloud (imported/other-device history):
+    // their ids are above the JS safe-integer range and already exist remotely.
     db.exec(
-      `UPDATE bills SET sync_status='pending' WHERE status IN ('closed','cancelled');
-       UPDATE preorders SET sync_status='pending';
+      `UPDATE bills SET sync_status='pending' WHERE status IN ('closed','cancelled') AND id <= 9007199254740991;
+       UPDATE preorders SET sync_status='pending' WHERE id <= 9007199254740991;
        UPDATE cash_counts SET sync_status='pending';`
     );
     const target = pendingCount();

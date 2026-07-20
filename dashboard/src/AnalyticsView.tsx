@@ -63,7 +63,8 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export default function AnalyticsView() {
   const [to, setTo] = useState(todayKey());
-  const [from, setFrom] = useState(() => addDays(todayKey(), -29));
+  // Default to the current month so the owner lands on this month's revenue.
+  const [from, setFrom] = useState(() => todayKey().slice(0, 8) + '01');
   const [res, setRes] = useState<RpcResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +142,38 @@ export default function AnalyticsView() {
   const prevFrom = addDays(from, -rangeLen);
   const prevTo = addDays(from, -1);
 
+  // ---- Owner headline: month forecast + auto-insights (all client-side from the
+  // aggregate the RPC already returned — no extra pull). ----
+  const avgTicket = t && t.bills ? Math.round(t.billRevenue / t.bills) : 0;
+  const tk = todayKey();
+  const dayOfMonth = parseInt(tk.slice(8, 10), 10);
+  const daysInMonth = new Date(parseInt(tk.slice(0, 4), 10), parseInt(tk.slice(5, 7), 10), 0).getDate();
+  // Run-rate projection for the current month from month-to-date collections.
+  const projectedMonth = t && dayOfMonth ? Math.round((t.mtdTotalCollected / dayOfMonth) * daysInMonth) : 0;
+  // Busiest / quietest weekday within the selected range (ignore days with none).
+  const wkNonZero = weekdayData.filter((w) => w.revenue > 0);
+  const bestWeekday = wkNonZero.length ? wkNonZero.reduce((a, b) => (b.revenue > a.revenue ? b : a)) : null;
+  const slowWeekday = wkNonZero.length ? wkNonZero.reduce((a, b) => (b.revenue < a.revenue ? b : a)) : null;
+  const dominantMode = (Object.entries(byMode) as Array<[string, number]>)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1])[0];
+
+  const insights = useMemo(() => {
+    if (!t) return [] as string[];
+    const out: string[] = [];
+    if (growth != null)
+      out.push(`Collections are ${growth >= 0 ? 'up' : 'down'} ${Math.abs(growth)}% vs the previous ${rangeLen}-day period.`);
+    if (projectedMonth > 0)
+      out.push(`On the current run-rate, this month is tracking to about ${inr(projectedMonth)} (${dayOfMonth}/${daysInMonth} days in).`);
+    if (bestWeekday) out.push(`${bestWeekday.label} is your strongest weekday${slowWeekday && slowWeekday.label !== bestWeekday.label ? `; ${slowWeekday.label} the quietest` : ''}.`);
+    if (t.peakHour) out.push(`Peak trading hour is ${hourLabel(t.peakHour.hour)} (${inr(t.peakHour.revenue)}).`);
+    if (dominantMode) out.push(`${dominantMode[0].toUpperCase()} is ${Math.round((dominantMode[1] / modeTotal) * 100)}% of collections.`);
+    if (avgTicket) out.push(`Average bill is ${inr(avgTicket)} across ${t.bills} bills.`);
+    if (t.voidsCount) out.push(`${t.voidsCount} void(s) worth ${inr(t.voidsTotal)} — worth a quick check.`);
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, growth, projectedMonth, bestWeekday?.label, slowWeekday?.label, dominantMode?.[0]]);
+
   function preset(days: number) {
     setFrom(addDays(todayKey(), -(days - 1)));
     setTo(todayKey());
@@ -152,13 +185,23 @@ export default function AnalyticsView() {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
+      <div className="no-print flex flex-wrap items-center justify-end gap-2 text-sm">
         <button className="rounded-md border border-stone-300 px-3 py-1.5" onClick={() => preset(7)}>7d</button>
         <button className="rounded-md border border-stone-300 px-3 py-1.5" onClick={() => preset(30)}>30d</button>
         <button className="rounded-md border border-stone-300 px-3 py-1.5" onClick={thisMonth}>Month</button>
         <input type="date" className="input" value={from} max={to} onChange={(e) => setFrom(e.target.value)} />
         <span className="text-stone-400">→</span>
         <input type="date" className="input" value={to} max={todayKey()} onChange={(e) => setTo(e.target.value)} />
+        <button
+          className="rounded-md border border-stone-300 px-3 py-1.5"
+          onClick={() => window.print()}
+          title="Save or print this report as a PDF"
+        >
+          ⤓ PDF
+        </button>
+      </div>
+      <div className="hidden items-baseline justify-between print:flex">
+        <h1 className="text-lg font-bold">Analytics — {from} to {to}</h1>
       </div>
 
       {error && <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
@@ -180,6 +223,36 @@ export default function AnalyticsView() {
             <Stat label="Voids" value={String(t.voidsCount)} sub={inr(t.voidsTotal)} tone={t.voidsCount ? 'rose' : undefined} />
             <Stat label="Discounts" value={inr(t.discounts)} />
             <Stat label="Best day" value={t.bestDay ? inr(t.bestDay.revenue) : '—'} sub={t.bestDay?.date.slice(5)} />
+            <Stat label="Avg bill" value={inr(avgTicket)} sub={`${t.bills} bills`} />
+          </section>
+
+          {/* Owner headline: forecast + plain-language insights */}
+          <section className="grid grid-cols-1 gap-3 lg:grid-cols-[18rem_1fr]">
+            <div className="stat ring-1 ring-brand-200">
+              <div className="text-xs uppercase tracking-wide text-stone-500">This month — projected</div>
+              <div className="mt-1 text-2xl font-bold text-brand-700">{inr(projectedMonth)}</div>
+              <div className="text-xs text-stone-500">
+                {inr(t.mtdTotalCollected)} so far · {dayOfMonth}/{daysInMonth} days · run-rate
+              </div>
+              <div className="mt-2 h-2 w-full rounded bg-stone-100" title={`${Math.round((dayOfMonth / daysInMonth) * 100)}% of the month elapsed`}>
+                <div className="h-2 rounded bg-brand-500" style={{ width: `${Math.round((dayOfMonth / daysInMonth) * 100)}%` }} />
+              </div>
+            </div>
+            <div className="card p-4">
+              <h2 className="mb-2 text-sm font-semibold text-stone-700">Insights</h2>
+              {insights.length ? (
+                <ul className="space-y-1.5 text-sm text-stone-700">
+                  {insights.map((line, i) => (
+                    <li key={i} className="flex gap-2">
+                      <span className="text-brand-500">•</span>
+                      <span>{line}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <Empty>Not enough data yet</Empty>
+              )}
+            </div>
           </section>
 
           <div className="card p-4">

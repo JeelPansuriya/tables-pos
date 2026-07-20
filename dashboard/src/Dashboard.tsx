@@ -224,7 +224,7 @@ export default function Dashboard({ session }: { session: Session }) {
 
   return (
     <div className="mx-auto max-w-5xl p-3 sm:p-5">
-      <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <header className="no-print mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-brand-800">Sales Dashboard</h1>
           <p className="text-xs text-stone-500">

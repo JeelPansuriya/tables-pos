@@ -4,6 +4,7 @@ import { useStore } from '../store';
 import type { MealType } from '../types';
 import BillEditor, { type EditorItem } from '../components/BillEditor';
 import PaymentBar, { type PaymentEntry } from '../components/PaymentBar';
+import NumberField from '../components/NumberField';
 
 // Lunch before the configured cutoff hour (default 17 = 5pm), dinner after.
 function mealForNow(lunchUntilHour: number): MealType {
@@ -100,15 +101,13 @@ export default function QuickBillPage() {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-stone-600">Discount (max ₹{maxDiscount.toFixed(0)})</span>
-                <input
-                  type="number"
+                <NumberField
+                  className="w-24 rounded border border-stone-300 px-2 py-0.5 text-right"
                   min={0}
                   max={maxDiscount}
-                  className="w-24 rounded border border-stone-300 px-2 py-0.5 text-right"
-                  value={discount || ''}
-                  onChange={(e) =>
-                    setDiscount(Math.min(maxDiscount, Math.max(0, parseFloat(e.target.value) || 0)))
-                  }
+                  value={discount}
+                  onChange={(n) => setDiscount(Math.min(maxDiscount, Math.max(0, n)))}
+                  placeholder="0"
                 />
               </div>
             </div>

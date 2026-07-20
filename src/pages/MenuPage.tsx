@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import ReasonModal from '../components/ReasonModal';
+import NumberField from '../components/NumberField';
 
 type Row = {
   id?: number;
@@ -181,46 +182,35 @@ export default function MenuPage() {
               </div>
               <div>
                 <label className="text-xs text-stone-600">Lunch ₹</label>
-                <input
-                  type="number"
+                <NumberField
                   className="input"
                   value={editing.lunch_price}
-                  onChange={(e) =>
-                    setEditing({ ...editing, lunch_price: parseFloat(e.target.value) || 0 })
-                  }
+                  onChange={(n) => setEditing({ ...editing, lunch_price: n })}
                 />
               </div>
               <div>
                 <label className="text-xs text-stone-600">Dinner ₹</label>
-                <input
-                  type="number"
+                <NumberField
                   className="input"
                   value={editing.dinner_price}
-                  onChange={(e) =>
-                    setEditing({ ...editing, dinner_price: parseFloat(e.target.value) || 0 })
-                  }
+                  onChange={(n) => setEditing({ ...editing, dinner_price: n })}
                 />
               </div>
               <div>
                 <label className="text-xs text-stone-600">Plate weight</label>
-                <input
-                  type="number"
+                <NumberField
                   className="input"
+                  step={0.5}
                   value={editing.plate_weight}
-                  onChange={(e) =>
-                    setEditing({ ...editing, plate_weight: parseFloat(e.target.value) || 0 })
-                  }
+                  onChange={(n) => setEditing({ ...editing, plate_weight: n })}
                 />
               </div>
               <div>
                 <label className="text-xs text-stone-600">Sort order</label>
-                <input
-                  type="number"
+                <NumberField
                   className="input"
                   value={editing.sort_order}
-                  onChange={(e) =>
-                    setEditing({ ...editing, sort_order: parseInt(e.target.value, 10) || 0 })
-                  }
+                  onChange={(n) => setEditing({ ...editing, sort_order: n })}
                 />
               </div>
               <div className="col-span-2 flex gap-3">

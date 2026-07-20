@@ -184,6 +184,21 @@ function initSchema(db: Database.Database) {
       counted_at TEXT NOT NULL DEFAULT (datetime('now')),
       sync_status TEXT NOT NULL DEFAULT 'pending'
     );
+
+    -- Money tracker: the day's total expenses (cash + UPI) entered directly by
+    -- the manager. One row per business day; any past day can be backfilled so
+    -- the ledger is consistent from the start.
+    CREATE TABLE IF NOT EXISTS day_expenses (
+      date TEXT PRIMARY KEY,                -- business day YYYY-MM-DD (local)
+      cash_expense REAL NOT NULL DEFAULT 0, -- total spent in cash that day
+      upi_expense REAL NOT NULL DEFAULT 0,  -- total spent via UPI that day
+      cash_extra REAL NOT NULL DEFAULT 0,   -- extra cash taken in outside a bill (tips, misc, dues)
+      upi_extra REAL NOT NULL DEFAULT 0,    -- extra UPI taken in outside a bill
+      note TEXT,
+      updated_by_user_id INTEGER REFERENCES users(id),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sync_status TEXT NOT NULL DEFAULT 'pending'
+    );
   `);
 
   // Migrate older dev databases that created cash_counts without sync_status.
@@ -194,8 +209,20 @@ function initSchema(db: Database.Database) {
   if (!tableHasColumn(db, 'preorders', 'discount')) {
     db.exec(`ALTER TABLE preorders ADD COLUMN discount REAL NOT NULL DEFAULT 0`);
   }
+  // Migrate: extra cash/UPI taken in outside a bill (Money tracker).
+  if (!tableHasColumn(db, 'day_expenses', 'cash_extra')) {
+    db.exec(`ALTER TABLE day_expenses ADD COLUMN cash_extra REAL NOT NULL DEFAULT 0`);
+  }
+  if (!tableHasColumn(db, 'day_expenses', 'upi_extra')) {
+    db.exec(`ALTER TABLE day_expenses ADD COLUMN upi_extra REAL NOT NULL DEFAULT 0`);
+  }
 
   seedTables(db);
+  // The walk-in "Counter" behaves like a table (multiple open bills, settle,
+  // etc.). Seeded unconditionally with INSERT OR IGNORE (label is UNIQUE) so
+  // existing databases pick it up on upgrade too. row_no 2 / sort_order 6 puts
+  // it first in the bottom row, which lines each row's last table up.
+  db.prepare(`INSERT OR IGNORE INTO tables (label, row_no, sort_order) VALUES ('Counter', 2, 6)`).run();
   seedDefaults(db);
   seedAdminUser(db);
 }

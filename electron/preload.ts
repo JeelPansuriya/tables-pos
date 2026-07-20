@@ -184,6 +184,18 @@ const api = {
     set: (payload: { date: string; counted_cash: number; note?: string }) =>
       invoke('cash:set', payload),
   },
+  money: {
+    get: (date?: string) => invoke('money:get', date),
+    set: (payload: {
+      date: string;
+      cash_expense: number;
+      upi_expense: number;
+      cash_extra?: number;
+      upi_extra?: number;
+      note?: string;
+    }) => invoke('money:set', payload),
+    range: (params: { from?: string; to?: string }) => invoke('money:range', params),
+  },
   audit: {
     list: (params: { from?: string; to?: string; q?: string }) =>
       invoke('audit:list', params),
@@ -191,6 +203,7 @@ const api = {
   cloud: {
     pushPending: () => invoke('cloud:pushPending'),
     pullSnapshot: () => invoke('cloud:pullSnapshot'),
+    pullMerge: () => invoke('cloud:pullMerge'),
     resyncAll: () => invoke('cloud:resyncAll'),
     status: () => invoke('cloud:status'),
   },

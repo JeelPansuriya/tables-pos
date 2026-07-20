@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import type { MenuItem, MealType } from '../types';
 import type { EditorItem } from './BillItemList';
+import NumberField from './NumberField';
 
 type Props = {
   menu: MenuItem[];
@@ -117,13 +118,13 @@ export default function MenuGrid({
           >
             −
           </button>
-          <input
+          <NumberField
             className="w-14 rounded border border-stone-300 px-1 py-0.5 text-center"
-            type="number"
             min={1}
             value={qty}
+            emptyValue={0}
             disabled={disabled}
-            onChange={(e) => setQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+            onChange={setQty}
           />
           <button
             type="button"

@@ -16,6 +16,22 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* PDF / print: drop the app chrome and let cards flow onto the page without
+   splitting mid-card. Triggered by the "⤓ PDF" button (window.print). */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  .card,
+  .stat {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+}
+
 @layer components {
   .card {
     @apply rounded-xl border border-stone-200 bg-white shadow-sm;

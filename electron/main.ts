@@ -1,8 +1,9 @@
 import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import { autoCancelStaleOpenBills, backupDatabase, getDb } from './db';
+import { restoreSession } from './auth';
 import { registerIpc } from './ipc';
-import { startCloudScheduler } from './sync';
+import { startCloudScheduler, cloudEnabled, pullAndMerge } from './sync';
 import { registerUpdater, checkForUpdatesOnLaunch } from './updater';
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -45,6 +46,9 @@ function createWindow() {
 app.whenReady().then(() => {
   // Initialize DB before any IPC handler runs.
   getDb();
+  // Restore the last signed-in user so the app reopens into their session
+  // (persistent login) rather than the login screen every launch.
+  restoreSession(getDb());
   registerIpc();
   createWindow();
 
@@ -60,6 +64,25 @@ app.whenReady().then(() => {
   // Background cloud backup: pushes any pending bills/pre-orders on a heartbeat
   // (and shortly after each mutation) when cloud sync is enabled in Settings.
   startCloudScheduler();
+
+  // One-shot merge-pull a little after boot: additively bring down any cloud
+  // rows this PC is missing (imported old history, other devices) so the app
+  // shows the full shared dataset. Never deletes local rows; runs once per
+  // launch to keep read egress low.
+  if (cloudEnabled()) {
+    setTimeout(() => {
+      pullAndMerge()
+        .then((r) => {
+          if (r.ok) {
+            const added = Object.values(r.counts ?? {}).reduce((s, n) => s + n, 0);
+            if (added > 0) console.log(`Cloud merge-pull added ${added} row(s).`);
+          } else {
+            console.error('Cloud merge-pull failed:', r.error);
+          }
+        })
+        .catch((e) => console.error('Cloud merge-pull error:', e));
+    }, 12000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

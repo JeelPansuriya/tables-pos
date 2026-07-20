@@ -19,6 +19,12 @@ import { getDb } from './db';
  * cloud copy; child item/payment rows are append-only (ignore-duplicates).
  */
 
+// Rows pulled from the cloud (imported v1 history, other devices) can carry ids
+// above JS's safe-integer range, which round when they come through JSON. They
+// already exist in the cloud, so they must never be pushed back — doing so would
+// mint a duplicate under the rounded id. Every push path filters them out.
+const MAX_SAFE_ID = 9007199254740991; // Number.MAX_SAFE_INTEGER
+
 let syncing = false;
 let soonTimer: NodeJS.Timeout | null = null;
 let intervalTimer: NodeJS.Timeout | null = null;
@@ -110,7 +116,7 @@ export async function syncPending(): Promise<SyncResult> {
   try {
     const syncedBills = await pushBills(db, cfg);
     const syncedPreorders = await pushPreorders(db, cfg);
-    await pushCashCounts(db, cfg);
+    await pushDayExpenses(db, cfg);
     setSetting('last_sync_at', new Date().toISOString());
     setSetting('last_sync_error', '');
     return { ok: true, syncedBills, syncedPreorders };
@@ -131,6 +137,7 @@ async function pushBills(db: Database, cfg: CloudConfig): Promise<number> {
               b.total, b.plates, b.opened_at, b.closed_at, b.cancelled_at, b.cancel_reason
        FROM bills b LEFT JOIN tables t ON t.id = b.table_id
        WHERE b.sync_status = 'pending' AND b.status IN ('closed','cancelled')
+         AND b.id <= ${MAX_SAFE_ID}
        ORDER BY b.id ASC LIMIT 500`
     )
     .all() as Array<{ id: number }>;
@@ -175,7 +182,7 @@ async function pushPreorders(db: Database, cfg: CloudConfig): Promise<number> {
       `SELECT id, order_no, customer_name, customer_mobile, for_date, for_time, meal_type,
               notes, total, advance_paid, balance_due, status, fulfilled_bill_id,
               created_at, fulfilled_at, cancelled_at, cancel_reason
-       FROM preorders WHERE sync_status = 'pending' ORDER BY id ASC LIMIT 500`
+       FROM preorders WHERE sync_status = 'pending' AND id <= ${MAX_SAFE_ID} ORDER BY id ASC LIMIT 500`
     )
     .all() as Array<{ id: number }>;
   if (preorders.length === 0) return 0;
@@ -213,21 +220,21 @@ async function pushPreorders(db: Database, cfg: CloudConfig): Promise<number> {
 }
 
 /**
- * Push the daily cash-count / reconciliation rows. The table is tiny (one row
- * per day) and rows can be edited later, so we upsert all of them with
- * merge-duplicates rather than tracking a per-row sync flag.
+ * Push the Money-tracker day expenses (cash + UPI totals entered per day). One
+ * row per day, editable later, so upsert with merge-duplicates so a later edit
+ * overwrites the cloud copy. Pending-tracked like bills/pre-orders.
  */
-async function pushCashCounts(db: Database, cfg: CloudConfig): Promise<number> {
+async function pushDayExpenses(db: Database, cfg: CloudConfig): Promise<number> {
   const rows = db
     .prepare(
-      `SELECT date, counted_cash, note, counted_at FROM cash_counts
+      `SELECT date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at FROM day_expenses
        WHERE sync_status = 'pending' ORDER BY date ASC`
     )
     .all() as Array<{ date: string }>;
   if (rows.length === 0) return 0;
-  const err = await upsert(cfg, 'cash_counts', rows, 'merge-duplicates');
-  if (err) throw new Error(`cash_counts: ${err}`);
-  const mark = db.prepare(`UPDATE cash_counts SET sync_status='synced' WHERE date=?`);
+  const err = await upsert(cfg, 'day_expenses', rows, 'merge-duplicates');
+  if (err) throw new Error(`day_expenses: ${err}`);
+  const mark = db.prepare(`UPDATE day_expenses SET sync_status='synced' WHERE date=?`);
   const tx = db.transaction(() => rows.forEach((r) => mark.run(r.date)));
   tx();
   return rows.length;
@@ -385,17 +392,174 @@ export async function pullAndOverride(): Promise<PullResult> {
   }
 }
 
+/**
+ * Additive merge-pull: bring down every cloud row this PC is MISSING and insert
+ * it (INSERT OR IGNORE — keyed on the primary key), leaving all existing local
+ * rows untouched. This is how the imported v1 history (and anything created on
+ * another device) appears in the app, without the data-loss risk of the
+ * destructive `pullAndOverride`. Safe to run repeatedly (idempotent).
+ *
+ * Note: rows are matched by primary key. This is correct for a single active
+ * till plus imported/other-device history (the ids don't overlap). It is NOT a
+ * conflict-resolving multi-writer sync — two tills independently minting the
+ * same auto-increment id would collide; that needs the two-way model instead.
+ */
+export async function pullAndMerge(): Promise<PullResult> {
+  const cfg = resolveCloud();
+  if (!cfg) return { ok: false, error: 'Supabase URL/key not set.' };
+  const db = getDb();
+  try {
+    const [bills, billItems, billPayments, preorders, preorderItems, preorderPayments, cashCounts, dayExpenses] =
+      await Promise.all([
+        fetchAll(cfg, 'bills'),
+        fetchAll(cfg, 'bill_items'),
+        fetchAll(cfg, 'bill_payments'),
+        fetchAll(cfg, 'preorders'),
+        fetchAll(cfg, 'preorder_items'),
+        fetchAll(cfg, 'preorder_payments'),
+        fetchAll(cfg, 'cash_counts'),
+        fetchAll(cfg, 'day_expenses').catch(() => [] as any[]), // table may not exist yet
+      ]);
+
+    const tableByLabel = new Map(
+      (db.prepare(`SELECT id, label FROM tables`).all() as Array<{ id: number; label: string }>).map(
+        (t) => [t.label, t.id]
+      )
+    );
+    const menuIds = new Set(
+      (db.prepare(`SELECT id FROM menu_items`).all() as Array<{ id: number }>).map((m) => m.id)
+    );
+    const menuId = (v: any) => (v != null && menuIds.has(v) ? v : null);
+
+    // A child row is only inserted if its parent will be present locally after
+    // this pass (existing local rows ∪ the cloud rows we're inserting now).
+    const billIds = new Set<number>(
+      (db.prepare(`SELECT id FROM bills`).all() as Array<{ id: number }>).map((b) => b.id)
+    );
+    for (const b of bills) billIds.add(b.id);
+    const preIds = new Set<number>(
+      (db.prepare(`SELECT id FROM preorders`).all() as Array<{ id: number }>).map((p) => p.id)
+    );
+    for (const p of preorders) preIds.add(p.id);
+
+    let addedBills = 0, addedPre = 0, addedCash = 0, addedExp = 0;
+
+    const tx = db.transaction(() => {
+      const insBill = db.prepare(
+        `INSERT OR IGNORE INTO bills (id, token_no, type, status, table_id, meal_type, customer_name,
+           customer_mobile, notes, subtotal, discount, total, plates, opened_at, closed_at,
+           cancelled_at, cancel_reason, sync_status)
+         VALUES (@id,@token_no,@type,@status,@table_id,@meal_type,@customer_name,@customer_mobile,
+           @notes,@subtotal,@discount,@total,@plates,@opened_at,@closed_at,@cancelled_at,@cancel_reason,'synced')`
+      );
+      for (const b of bills)
+        addedBills += insBill.run({
+          id: b.id, token_no: b.token_no ?? null, type: b.type ?? 'dine_in', status: b.status ?? 'closed',
+          table_id: tableByLabel.get(b.table_label) ?? null, meal_type: b.meal_type ?? 'dinner',
+          customer_name: b.customer_name ?? null, customer_mobile: b.customer_mobile ?? null,
+          notes: b.notes ?? null, subtotal: b.subtotal ?? 0, discount: b.discount ?? 0,
+          total: b.total ?? 0, plates: b.plates ?? 0, opened_at: b.opened_at ?? null,
+          closed_at: b.closed_at ?? null, cancelled_at: b.cancelled_at ?? null, cancel_reason: b.cancel_reason ?? null,
+        }).changes;
+
+      const insBillItem = db.prepare(
+        `INSERT OR IGNORE INTO bill_items (id, bill_id, menu_item_id, name, qty, unit_price, plate_weight, total, is_custom, sort_order)
+         VALUES (@id,@bill_id,@menu_item_id,@name,@qty,@unit_price,@plate_weight,@total,@is_custom,@sort_order)`
+      );
+      for (const it of billItems)
+        if (billIds.has(it.bill_id))
+          insBillItem.run({
+            id: it.id, bill_id: it.bill_id, menu_item_id: menuId(it.menu_item_id), name: it.name,
+            qty: it.qty, unit_price: it.unit_price, plate_weight: it.plate_weight ?? 1,
+            total: it.total, is_custom: it.is_custom ?? 0, sort_order: it.sort_order ?? 0,
+          });
+
+      const insBillPay = db.prepare(
+        `INSERT OR IGNORE INTO bill_payments (id, bill_id, amount, mode, received_at, cash_received, change_given, notes)
+         VALUES (@id,@bill_id,@amount,@mode,@received_at,@cash_received,@change_given,@notes)`
+      );
+      for (const p of billPayments)
+        if (billIds.has(p.bill_id))
+          insBillPay.run({
+            id: p.id, bill_id: p.bill_id, amount: p.amount, mode: p.mode, received_at: p.received_at ?? null,
+            cash_received: p.cash_received ?? null, change_given: p.change_given ?? null, notes: p.notes ?? null,
+          });
+
+      const insPre = db.prepare(
+        `INSERT OR IGNORE INTO preorders (id, order_no, customer_name, customer_mobile, for_date, for_time, meal_type,
+           notes, total, advance_paid, balance_due, status, fulfilled_bill_id, created_at, fulfilled_at,
+           cancelled_at, cancel_reason, sync_status)
+         VALUES (@id,@order_no,@customer_name,@customer_mobile,@for_date,@for_time,@meal_type,@notes,@total,
+           @advance_paid,@balance_due,@status,@fulfilled_bill_id,@created_at,@fulfilled_at,@cancelled_at,@cancel_reason,'synced')`
+      );
+      for (const p of preorders)
+        addedPre += insPre.run({
+          id: p.id, order_no: p.order_no ?? null, customer_name: p.customer_name, customer_mobile: p.customer_mobile ?? null,
+          for_date: p.for_date, for_time: p.for_time ?? null, meal_type: p.meal_type ?? null, notes: p.notes ?? null,
+          total: p.total ?? 0, advance_paid: p.advance_paid ?? 0, balance_due: p.balance_due ?? 0,
+          status: p.status ?? 'pending', fulfilled_bill_id: billIds.has(p.fulfilled_bill_id) ? p.fulfilled_bill_id : null,
+          created_at: p.created_at ?? null, fulfilled_at: p.fulfilled_at ?? null, cancelled_at: p.cancelled_at ?? null,
+          cancel_reason: p.cancel_reason ?? null,
+        }).changes;
+
+      const insPreItem = db.prepare(
+        `INSERT OR IGNORE INTO preorder_items (id, preorder_id, menu_item_id, name, qty, unit_price, total, is_custom, sort_order)
+         VALUES (@id,@preorder_id,@menu_item_id,@name,@qty,@unit_price,@total,@is_custom,@sort_order)`
+      );
+      for (const it of preorderItems)
+        if (preIds.has(it.preorder_id))
+          insPreItem.run({
+            id: it.id, preorder_id: it.preorder_id, menu_item_id: menuId(it.menu_item_id), name: it.name,
+            qty: it.qty, unit_price: it.unit_price, total: it.total, is_custom: it.is_custom ?? 0, sort_order: it.sort_order ?? 0,
+          });
+
+      const insPrePay = db.prepare(
+        `INSERT OR IGNORE INTO preorder_payments (id, preorder_id, amount, mode, received_at, notes)
+         VALUES (@id,@preorder_id,@amount,@mode,@received_at,@notes)`
+      );
+      for (const p of preorderPayments)
+        if (preIds.has(p.preorder_id))
+          insPrePay.run({
+            id: p.id, preorder_id: p.preorder_id, amount: p.amount, mode: p.mode, received_at: p.received_at ?? null, notes: p.notes ?? null,
+          });
+
+      const insCash = db.prepare(
+        `INSERT OR IGNORE INTO cash_counts (date, counted_cash, note, counted_at, sync_status)
+         VALUES (@date,@counted_cash,@note,@counted_at,'synced')`
+      );
+      for (const c of cashCounts)
+        addedCash += insCash.run({ date: c.date, counted_cash: c.counted_cash ?? 0, note: c.note ?? null, counted_at: c.counted_at ?? null }).changes;
+
+      const insExp = db.prepare(
+        `INSERT OR IGNORE INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at, sync_status)
+         VALUES (@date,@cash_expense,@upi_expense,@cash_extra,@upi_extra,@note,@updated_at,'synced')`
+      );
+      for (const e of dayExpenses)
+        addedExp += insExp.run({
+          date: e.date, cash_expense: e.cash_expense ?? 0, upi_expense: e.upi_expense ?? 0,
+          cash_extra: e.cash_extra ?? 0, upi_extra: e.upi_extra ?? 0,
+          note: e.note ?? null, updated_at: e.updated_at ?? null,
+        }).changes;
+    });
+    tx();
+
+    return { ok: true, counts: { bills: addedBills, preorders: addedPre, cash_counts: addedCash, day_expenses: addedExp } };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
 /** Count rows actually eligible for sync (terminal bills + all pre-orders). */
 export function pendingCount(): number {
   const db = getDb();
   const b = db
     .prepare(
       `SELECT COUNT(*) AS c FROM bills
-       WHERE sync_status = 'pending' AND status IN ('closed','cancelled')`
+       WHERE sync_status = 'pending' AND status IN ('closed','cancelled') AND id <= ${MAX_SAFE_ID}`
     )
     .get() as { c: number };
   const p = db
-    .prepare(`SELECT COUNT(*) AS c FROM preorders WHERE sync_status = 'pending'`)
+    .prepare(`SELECT COUNT(*) AS c FROM preorders WHERE sync_status = 'pending' AND id <= ${MAX_SAFE_ID}`)
     .get() as { c: number };
   const cash = db
     .prepare(`SELECT COUNT(*) AS c FROM cash_counts WHERE sync_status = 'pending'`)

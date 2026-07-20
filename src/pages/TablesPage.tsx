@@ -7,6 +7,7 @@ import BillItemList, { type EditorItem } from '../components/BillItemList';
 import { addToItems } from '../components/BillEditor';
 import PaymentBar, { type PaymentEntry } from '../components/PaymentBar';
 import ReasonModal from '../components/ReasonModal';
+import NumberField from '../components/NumberField';
 
 // Lunch before the configured cutoff hour (default 17 = 5pm), dinner after —
 // so the default meal flips to dinner automatically each evening.
@@ -35,6 +36,8 @@ export default function TablesPage() {
   const [activeTableLabel, setActiveTableLabel] = useState('');
   const [items, setItems] = useState<EditorItem[]>([]);
   const [discount, setDiscount] = useState(0);
+  // Free-text remark saved on the bill (e.g. reason for a discount).
+  const [note, setNote] = useState('');
   const lunchUntil = parseInt(settings.lunch_until_hour || '17', 10) || 17;
   const [mealType, setMealType] = useState<MealType>(mealForNow(lunchUntil));
   const [defaultMeal, setDefaultMeal] = useState<MealType>(mealForNow(lunchUntil));
@@ -98,17 +101,18 @@ export default function TablesPage() {
   useEffect(() => {
     if (!activeBillId || closingRef.current) return;
     const t = setTimeout(async () => {
-      await api.tables.saveOpen(activeBillId, items, undefined, appliedDiscount);
+      await api.tables.saveOpen(activeBillId, items, { notes: note }, appliedDiscount);
       if (!closingRef.current) await refresh();
     }, 800);
     return () => clearTimeout(t);
-  }, [items, activeBillId, appliedDiscount]);
+  }, [items, activeBillId, appliedDiscount, note]);
 
   function loadFromBill(bill: any, label: string) {
     setActiveBillId(bill.id);
     setActiveTableLabel(label);
     setMealType(bill.meal_type);
     setDiscount(bill.discount || 0);
+    setNote(bill.notes || '');
     setItems(
       bill.items.map((it: any) => ({
         menu_item_id: it.menu_item_id,
@@ -123,7 +127,7 @@ export default function TablesPage() {
 
   /** Persist the active bill's items immediately before navigating away from it. */
   async function flushActive() {
-    if (activeBillId) await api.tables.saveOpen(activeBillId, items, undefined, appliedDiscount);
+    if (activeBillId) await api.tables.saveOpen(activeBillId, items, { notes: note }, appliedDiscount);
   }
 
   function selectTable(t: TableTile) {
@@ -156,6 +160,7 @@ export default function TablesPage() {
     setActiveBillId(null);
     setItems([]);
     setDiscount(0);
+    setNote('');
     setActiveTableLabel('');
   }
 
@@ -170,7 +175,7 @@ export default function TablesPage() {
     closingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
-    const save = await api.tables.saveOpen(activeBillId, items, undefined, appliedDiscount);
+    const save = await api.tables.saveOpen(activeBillId, items, { notes: note }, appliedDiscount);
     if (!save?.ok) {
       setBusy(false);
       closingRef.current = false;
@@ -350,9 +355,11 @@ export default function TablesPage() {
                     <div className="text-xs text-stone-500">
                       ₹{(b.id === activeBillId ? total : b.total).toFixed(0)} · {b.meal_type}
                     </div>
-                    <div className="text-[10px] text-stone-400">
-                      open {durLabel(openMinsFrom(b.opened_at, now))}
-                    </div>
+                    {selectedTile.label !== 'Counter' && (
+                      <div className="text-[10px] text-stone-400">
+                        open {durLabel(openMinsFrom(b.opened_at, now))}
+                      </div>
+                    )}
                   </button>
                 ))}
                 <button
@@ -399,7 +406,7 @@ export default function TablesPage() {
               </button>
               <div className="font-semibold">
                 {activeName}
-                {activeOpenedAt && (
+                {activeOpenedAt && activeTableLabel !== 'Counter' && (
                   <span className="ml-2 text-xs font-normal text-stone-500">
                     · open {durLabel(openMinsFrom(activeOpenedAt, now))}
                   </span>
@@ -424,19 +431,26 @@ export default function TablesPage() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-stone-600">Discount (max ₹{maxDiscount.toFixed(0)})</span>
-                  <input
-                    type="number"
+                  <NumberField
+                    className="w-24 rounded border border-stone-300 px-2 py-0.5 text-right"
                     min={0}
                     max={maxDiscount}
-                    className="w-24 rounded border border-stone-300 px-2 py-0.5 text-right"
-                    value={discount || ''}
-                    onChange={(e) =>
-                      setDiscount(Math.min(maxDiscount, Math.max(0, parseFloat(e.target.value) || 0)))
-                    }
+                    value={discount}
+                    onChange={(n) => setDiscount(Math.min(maxDiscount, Math.max(0, n)))}
+                    placeholder="0"
                   />
                 </div>
               </div>
             )}
+            <div className="px-1">
+              <label className="text-xs text-stone-600">Note / remark (optional)</label>
+              <input
+                className="input"
+                placeholder="e.g. reason for discount, special request"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </div>
             <PaymentBar
               total={total}
               disabled={busy || items.length === 0}
