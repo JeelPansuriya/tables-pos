@@ -88,26 +88,6 @@ export default function SettingsPage() {
     }
   }
 
-  const [pulling, setPulling] = useState(false);
-  async function doPullMerge() {
-    setPulling(true);
-    setMsg('Syncing from cloud… bringing in any data this PC is missing.');
-    const r = await api.cloud.pullMerge();
-    setPulling(false);
-    if (r?.ok) {
-      const c = r.counts || {};
-      const added = (c.bills ?? 0) + (c.preorders ?? 0) + (c.cash_counts ?? 0) + (c.day_expenses ?? 0);
-      setMsg(
-        added > 0
-          ? `Synced from cloud: added ${c.bills ?? 0} bills, ${c.preorders ?? 0} pre-orders. Reloading…`
-          : 'Already up to date with the cloud.'
-      );
-      if (added > 0) setTimeout(() => window.location.reload(), 1500);
-    } else {
-      setMsg(r?.error || 'Sync from cloud failed');
-    }
-  }
-
   async function doRestore() {
     setRestoreOpen(false);
     setRestoring(true);
@@ -327,14 +307,6 @@ export default function SettingsPage() {
               <div className="flex flex-wrap gap-2">
                 <button className="btn-primary w-fit" onClick={doSync} disabled={syncing || !cloud.enabled}>
                   {syncing ? 'Syncing…' : 'Sync now'}
-                </button>
-                <button
-                  className="btn-ghost w-fit border border-stone-300"
-                  onClick={doPullMerge}
-                  disabled={pulling || !cloud.enabled}
-                  title="Bring down any bills/pre-orders this PC is missing (old imported data, other devices). Adds only — never deletes."
-                >
-                  {pulling ? 'Syncing…' : 'Sync from cloud'}
                 </button>
                 <button
                   className="btn-ghost w-fit border border-stone-300"

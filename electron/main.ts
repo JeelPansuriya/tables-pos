@@ -3,7 +3,7 @@ import path from 'node:path';
 import { autoCancelStaleOpenBills, backupDatabase, getDb } from './db';
 import { restoreSession } from './auth';
 import { registerIpc } from './ipc';
-import { startCloudScheduler, cloudEnabled, pullAndMerge } from './sync';
+import { startCloudScheduler } from './sync';
 import { registerUpdater, checkForUpdatesOnLaunch } from './updater';
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -65,24 +65,10 @@ app.whenReady().then(() => {
   // (and shortly after each mutation) when cloud sync is enabled in Settings.
   startCloudScheduler();
 
-  // One-shot merge-pull a little after boot: additively bring down any cloud
-  // rows this PC is missing (imported old history, other devices) so the app
-  // shows the full shared dataset. Never deletes local rows; runs once per
-  // launch to keep read egress low.
-  if (cloudEnabled()) {
-    setTimeout(() => {
-      pullAndMerge()
-        .then((r) => {
-          if (r.ok) {
-            const added = Object.values(r.counts ?? {}).reduce((s, n) => s + n, 0);
-            if (added > 0) console.log(`Cloud merge-pull added ${added} row(s).`);
-          } else {
-            console.error('Cloud merge-pull failed:', r.error);
-          }
-        })
-        .catch((e) => console.error('Cloud merge-pull error:', e));
-    }, 12000);
-  }
+  // NOTE: cloud sync is intentionally push-only. We do NOT pull the cloud/v1
+  // archive into the operating database — those rows carry huge 60-bit ids that
+  // overflow JS's safe-integer range and corrupt bill lookups. The full history
+  // lives in the cloud and the web dashboard; this PC keeps only its own data.
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

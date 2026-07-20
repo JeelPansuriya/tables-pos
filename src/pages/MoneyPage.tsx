@@ -46,6 +46,7 @@ export default function MoneyPage() {
   const [upi, setUpi] = useState(0);
   const [cashIn, setCashIn] = useState(0); // extra cash taken in outside a bill
   const [upiIn, setUpiIn] = useState(0);
+  const [counted, setCounted] = useState(0); // actual cash counted in the drawer (end of day)
   const [note, setNote] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
   const [rows, setRows] = useState<RangeRow[]>([]);
@@ -60,6 +61,10 @@ export default function MoneyPage() {
       setUpiIn(r.upiExtra || 0);
       setNote(r.note || '');
     }
+    // Pull the end-of-day cash count that was entered previously (kept in the
+    // cash-count store) so it shows here and stays editable in one place.
+    const c = await api.cash.get(date);
+    if (c?.ok) setCounted(c.counted ?? 0);
   }
   async function loadRange() {
     const r = await api.money.range({});
@@ -82,6 +87,9 @@ export default function MoneyPage() {
       upi_extra: upiIn,
       note,
     });
+    // Persist the drawer count alongside, in the same cash store the old
+    // reconciliation used — so the two stay in sync.
+    await api.cash.set({ date, counted_cash: counted });
     setMsg(r?.ok ? 'Saved.' : r?.error || 'Failed');
     setTimeout(() => setMsg(null), 2500);
     await load();
@@ -101,6 +109,8 @@ export default function MoneyPage() {
   const salesCollected = info.cashCollected + info.upiCollected + info.cardCollected + info.otherCollected;
   const cashInHand = +(info.cashCollected + cashIn - cash).toFixed(2);
   const net = +(salesCollected + cashIn + upiIn - cash - upi).toFixed(2);
+  // Reconciliation: counted drawer cash vs the expected cash-in-hand.
+  const countedDiff = +(counted - cashInHand).toFixed(2);
 
   return (
     <div className="space-y-3">
@@ -187,6 +197,21 @@ export default function MoneyPage() {
         </div>
 
         <div>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-stone-600">
+            Cash counted (drawer)
+            <span className="ml-2 font-normal normal-case tracking-normal text-stone-500">
+              the actual cash in the drawer at end of day — compared against expected below
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-xs text-stone-600">Cash counted</label>
+              <NumberField className="input" min={0} value={counted} onChange={setCounted} placeholder="₹0" />
+            </div>
+          </div>
+        </div>
+
+        <div>
           <label className="text-xs text-stone-600">Note (optional)</label>
           <input
             className="input"
@@ -210,12 +235,19 @@ export default function MoneyPage() {
       </div>
 
       {/* Derived */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <KPI
-          label="Cash in hand"
+          label="Cash in hand (expected)"
           value={`₹${cashInHand.toFixed(2)}`}
-          hint="cash collected − cash expense"
+          hint="cash collected + extra − cash expense"
           tone={cashInHand < 0 ? 'rose' : 'emerald'}
+        />
+        <KPI label="Cash counted" value={`₹${counted.toFixed(2)}`} hint="what you counted in the drawer" />
+        <KPI
+          label="Over / short"
+          value={`${countedDiff >= 0 ? '+' : '−'}₹${Math.abs(countedDiff).toFixed(2)}`}
+          hint="counted − expected"
+          tone={countedDiff < 0 ? 'rose' : countedDiff > 0 ? 'emerald' : undefined}
         />
         <KPI
           label="Net (all modes)"

@@ -225,16 +225,16 @@ function initSchema(db: Database.Database) {
   db.prepare(`INSERT OR IGNORE INTO tables (label, row_no, sort_order) VALUES ('Counter', 2, 6)`).run();
   seedDefaults(db);
   seedAdminUser(db);
-  // Self-heal: importing v1 history / cloud rows carries 60-bit ids (~10^18),
-  // which pushed AUTOINCREMENT past JS's safe-integer limit — so freshly created
-  // bills got ids that collapse to the same JS number and the UI matched the
-  // wrong bill (items appearing on every table). Pull the counters back into the
-  // safe range so new bills/pre-orders always get exact, distinct ids.
+  // The app is push-only: the v1/cloud archive belongs in the cloud + dashboard,
+  // not in the operating database. Importing it here carried 60-bit ids (~10^18)
+  // that overflow JS's safe-integer limit, so newly created bills got ids that
+  // collapse together and the UI matched the wrong (old) bill — bills couldn't
+  // be opened/closed/cancelled correctly. Clear those imported/ghost rows out,
+  // then pull the AUTOINCREMENT counters back into the safe range so new rows
+  // always get exact, distinct, small ids.
+  const purged = purgeImportedRows(db);
+  if (purged > 0) console.log(`Removed ${purged} imported/archived row(s) from the operating DB.`);
   clampAutoIncrementToSafe(db);
-  // ...and clear any ghost open bills the bug already created (huge ids that
-  // collide in the UI and appear on every table). One-off self-clean on launch.
-  const purged = purgeCorruptOpenBills(db);
-  if (purged > 0) console.log(`Removed ${purged} corrupt open bill(s) with unsafe ids.`);
 }
 
 // Largest integer JavaScript can represent exactly (2^53 - 1). Ids above this
@@ -277,6 +277,33 @@ export function clampAutoIncrementToSafe(db: Database.Database) {
 export function purgeCorruptOpenBills(db: Database.Database): number {
   const r = db.prepare(`DELETE FROM bills WHERE status='open' AND id > ?`).run(MAX_SAFE_ID);
   return r.changes;
+}
+
+// Bills/pre-orders created by the app use small AUTOINCREMENT ids. Anything far
+// above a realistic operational count is an imported/archived row (v1 history
+// carries 60-bit hash ids) or a corrupt row from the id-overflow bug. Those do
+// not belong in the operating database — the app is push-only, and the archive
+// lives in the cloud/dashboard. This ceiling is orders of magnitude above any
+// real bill count yet far below the smallest realistic import id.
+const APP_MAX_OPERATIONAL_ID = 1_000_000_000;
+
+/**
+ * Keep the operating database free of imported/archived rows. Deletes bills and
+ * pre-orders whose id is above the operational ceiling (children cascade), after
+ * clearing any pre-order links to those bills so foreign keys don't block it.
+ * This is what makes the app reliable again after the cloud/v1 import: the
+ * operational tables only ever hold this PC's own small-id rows. Returns count.
+ */
+export function purgeImportedRows(db: Database.Database): number {
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE preorders SET fulfilled_bill_id=NULL WHERE fulfilled_bill_id > ?`).run(
+      APP_MAX_OPERATIONAL_ID
+    );
+    const pre = db.prepare(`DELETE FROM preorders WHERE id > ?`).run(APP_MAX_OPERATIONAL_ID).changes;
+    const bills = db.prepare(`DELETE FROM bills WHERE id > ?`).run(APP_MAX_OPERATIONAL_ID).changes;
+    return pre + bills;
+  });
+  return tx();
 }
 
 function seedTables(db: Database.Database) {

@@ -271,7 +271,7 @@ export async function pullAndOverride(): Promise<PullResult> {
   if (!cfg) return { ok: false, error: 'Supabase URL/key not set.' };
   const db = getDb();
   try {
-    const [bills, billItems, billPayments, preorders, preorderItems, preorderPayments, cashCounts] =
+    const [billsRaw, billItems, billPayments, preordersRaw, preorderItems, preorderPayments, cashCounts] =
       await Promise.all([
         fetchAll(cfg, 'bills'),
         fetchAll(cfg, 'bill_items'),
@@ -281,6 +281,14 @@ export async function pullAndOverride(): Promise<PullResult> {
         fetchAll(cfg, 'preorder_payments'),
         fetchAll(cfg, 'cash_counts'),
       ]);
+    // Never restore the archived v1/cloud rows (huge 60-bit ids) into the
+    // operating DB — they overflow JS's safe-integer range and corrupt bill
+    // lookups. Only this PC's own small-id operational rows come back; the
+    // archive stays in the cloud for the dashboard. Child rows are already
+    // filtered by the surviving bill/pre-order id sets below.
+    const OP_ID_CAP = 1_000_000_000;
+    const bills = billsRaw.filter((b: any) => Number(b.id) <= OP_ID_CAP);
+    const preorders = preordersRaw.filter((p: any) => Number(p.id) <= OP_ID_CAP);
 
     const tableByLabel = new Map(
       (db.prepare(`SELECT id, label FROM tables`).all() as Array<{ id: number; label: string }>).map(
