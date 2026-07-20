@@ -225,6 +225,41 @@ function initSchema(db: Database.Database) {
   db.prepare(`INSERT OR IGNORE INTO tables (label, row_no, sort_order) VALUES ('Counter', 2, 6)`).run();
   seedDefaults(db);
   seedAdminUser(db);
+  // Self-heal: importing v1 history / cloud rows carries 60-bit ids (~10^18),
+  // which pushed AUTOINCREMENT past JS's safe-integer limit — so freshly created
+  // bills got ids that collapse to the same JS number and the UI matched the
+  // wrong bill (items appearing on every table). Pull the counters back into the
+  // safe range so new bills/pre-orders always get exact, distinct ids.
+  clampAutoIncrementToSafe(db);
+}
+
+// Largest integer JavaScript can represent exactly (2^53 - 1). Ids above this
+// lose precision when read into the renderer, so two different bills can compare
+// equal — hence bills/pre-orders must keep their ids at or below this.
+const MAX_SAFE_ID = 9007199254740991;
+
+/**
+ * Keep the AUTOINCREMENT counters for `bills` and `preorders` within JS's
+ * safe-integer range. Imported v1/cloud rows use huge 60-bit ids; inserting them
+ * bumps sqlite_sequence into the unsafe zone, so subsequent auto-assigned ids
+ * collapse to indistinguishable JS numbers. Resetting the sequence to the
+ * largest *safe* existing id means new rows get exact ids (safe_max+1, +2, …)
+ * that never collide with the huge historical rows. Safe to run every launch.
+ */
+export function clampAutoIncrementToSafe(db: Database.Database) {
+  for (const table of ['bills', 'preorders'] as const) {
+    const seqRow = db
+      .prepare(`SELECT seq FROM sqlite_sequence WHERE name=?`)
+      .get(table) as { seq: number } | undefined;
+    // Nothing to do if the table never auto-inserted, or the counter is already safe.
+    if (!seqRow || seqRow.seq <= MAX_SAFE_ID) continue;
+    const maxSafe = (
+      db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table} WHERE id <= ?`).get(MAX_SAFE_ID) as {
+        m: number;
+      }
+    ).m;
+    db.prepare(`UPDATE sqlite_sequence SET seq=? WHERE name=?`).run(maxSafe, table);
+  }
 }
 
 function seedTables(db: Database.Database) {

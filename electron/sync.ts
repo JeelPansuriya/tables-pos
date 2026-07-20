@@ -1,5 +1,5 @@
 import type { Database } from 'better-sqlite3';
-import { getDb } from './db';
+import { getDb, clampAutoIncrementToSafe } from './db';
 
 /**
  * Cloud backup (phase 2).
@@ -385,6 +385,9 @@ export async function pullAndOverride(): Promise<PullResult> {
         insCash.run({ date: c.date, counted_cash: c.counted_cash ?? 0, note: c.note ?? null, counted_at: c.counted_at ?? null });
     });
     tx();
+    // Huge imported ids just bumped the AUTOINCREMENT counters — pull them back
+    // into JS's safe range so new bills/pre-orders get exact, distinct ids.
+    clampAutoIncrementToSafe(db);
 
     return { ok: true, counts: { bills: bills.length, preorders: preorders.length, cash_counts: cashCounts.length } };
   } catch (err: any) {
@@ -542,6 +545,9 @@ export async function pullAndMerge(): Promise<PullResult> {
         }).changes;
     });
     tx();
+    // Huge imported ids just bumped the AUTOINCREMENT counters — pull them back
+    // into JS's safe range so new bills/pre-orders get exact, distinct ids.
+    clampAutoIncrementToSafe(db);
 
     return { ok: true, counts: { bills: addedBills, preorders: addedPre, cash_counts: addedCash, day_expenses: addedExp } };
   } catch (err: any) {
