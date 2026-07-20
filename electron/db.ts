@@ -231,6 +231,10 @@ function initSchema(db: Database.Database) {
   // wrong bill (items appearing on every table). Pull the counters back into the
   // safe range so new bills/pre-orders always get exact, distinct ids.
   clampAutoIncrementToSafe(db);
+  // ...and clear any ghost open bills the bug already created (huge ids that
+  // collide in the UI and appear on every table). One-off self-clean on launch.
+  const purged = purgeCorruptOpenBills(db);
+  if (purged > 0) console.log(`Removed ${purged} corrupt open bill(s) with unsafe ids.`);
 }
 
 // Largest integer JavaScript can represent exactly (2^53 - 1). Ids above this
@@ -260,6 +264,19 @@ export function clampAutoIncrementToSafe(db: Database.Database) {
     ).m;
     db.prepare(`UPDATE sqlite_sequence SET seq=? WHERE name=?`).run(maxSafe, table);
   }
+}
+
+/**
+ * Remove OPEN bills whose id is above the JS-safe range. These can only be
+ * "ghost" bills created during the id-overflow bug (imported/cloud history is
+ * always closed or cancelled, never open). Their huge ids collide in the
+ * renderer, so they show up on every table and can't be opened or settled
+ * correctly — deleting them (children cascade) is the only clean cure. Safe:
+ * legitimate open bills always have small, in-range ids. Returns rows removed.
+ */
+export function purgeCorruptOpenBills(db: Database.Database): number {
+  const r = db.prepare(`DELETE FROM bills WHERE status='open' AND id > ?`).run(MAX_SAFE_ID);
+  return r.changes;
 }
 
 function seedTables(db: Database.Database) {
