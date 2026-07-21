@@ -1471,7 +1471,7 @@ export function registerIpc() {
       params?.from ||
       (() => {
         const d = new Date(to + 'T00:00:00');
-        d.setDate(d.getDate() - 13);
+        d.setDate(d.getDate() - 29);
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       })();
 
@@ -1541,6 +1541,9 @@ export function registerIpc() {
           upiExpense: r.upiExpense,
           note: r.note,
           net: +(totalCollected - r.cashExpense - r.upiExpense).toFixed(2),
+          // Running carry-forward balance as of end of this day.
+          expectedCash: expectedBalance(r.date, 'cash'),
+          expectedUpi: expectedBalance(r.date, 'upi'),
         };
       })
       .sort((a, b) => (a.date < b.date ? 1 : -1));

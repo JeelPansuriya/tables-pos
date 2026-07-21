@@ -37,6 +37,8 @@ type RangeRow = {
   upiCollected: number;
   otherCollected: number;
   totalCollected: number;
+  expectedCash: number;
+  expectedUpi: number;
   cashExpense: number;
   upiExpense: number;
   note: string;
@@ -56,6 +58,14 @@ export default function MoneyPage() {
   const [note, setNote] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
   const [rows, setRows] = useState<RangeRow[]>([]);
+  // History range — default last 30 days, adjustable.
+  const monthAgo = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 29);
+    return ymd(d);
+  })();
+  const [histFrom, setHistFrom] = useState(monthAgo);
+  const [histTo, setHistTo] = useState(today);
 
   async function load() {
     const r = await api.money.get(date);
@@ -72,7 +82,7 @@ export default function MoneyPage() {
     }
   }
   async function loadRange() {
-    const r = await api.money.range({});
+    const r = await api.money.range({ from: histFrom, to: histTo });
     if (r?.ok) setRows(r.days);
   }
   useEffect(() => {
@@ -81,7 +91,8 @@ export default function MoneyPage() {
   }, [date]);
   useEffect(() => {
     loadRange();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [histFrom, histTo]);
 
   async function save() {
     const r = await api.money.set({
@@ -284,18 +295,38 @@ export default function MoneyPage() {
 
       {/* History */}
       <div className="card overflow-hidden">
-        <div className="border-b border-stone-200 p-3 text-sm font-semibold">
-          Last 14 days <span className="font-normal text-stone-500">(click a day to edit)</span>
+        <div className="flex flex-wrap items-center gap-2 border-b border-stone-200 p-3 text-sm">
+          <span className="font-semibold">Daily money</span>
+          <span className="font-normal text-stone-500">(click a day to edit)</span>
+          <div className="ml-auto flex items-center gap-2">
+            <input
+              type="date"
+              className="input py-1"
+              value={histFrom}
+              max={histTo}
+              onChange={(e) => setHistFrom(e.target.value)}
+            />
+            <span className="text-stone-400">→</span>
+            <input
+              type="date"
+              className="input py-1"
+              value={histTo}
+              max={today}
+              onChange={(e) => setHistTo(e.target.value)}
+            />
+          </div>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-stone-100 text-left text-stone-500">
             <tr>
               <th className="p-2">Date</th>
               <th className="p-2 text-right">Cash in</th>
               <th className="p-2 text-right">UPI in</th>
-              <th className="p-2 text-right">Total in</th>
               <th className="p-2 text-right">Cash exp</th>
               <th className="p-2 text-right">UPI exp</th>
+              <th className="p-2 text-right">Exp. cash</th>
+              <th className="p-2 text-right">Exp. UPI</th>
               <th className="p-2 text-right">Net</th>
               <th className="p-2">Note</th>
             </tr>
@@ -312,26 +343,28 @@ export default function MoneyPage() {
                 <td className="p-2 font-medium">{r.date}</td>
                 <td className="p-2 text-right tabular-nums text-emerald-700">₹{r.cashCollected.toFixed(0)}</td>
                 <td className="p-2 text-right tabular-nums text-sky-700">₹{r.upiCollected.toFixed(0)}</td>
-                <td className="p-2 text-right tabular-nums">₹{r.totalCollected.toFixed(0)}</td>
                 <td className="p-2 text-right tabular-nums text-rose-700">
                   {r.cashExpense ? `₹${r.cashExpense.toFixed(0)}` : '—'}
                 </td>
                 <td className="p-2 text-right tabular-nums text-rose-700">
                   {r.upiExpense ? `₹${r.upiExpense.toFixed(0)}` : '—'}
                 </td>
-                <td className="p-2 text-right font-medium tabular-nums">₹{r.net.toFixed(0)}</td>
+                <td className="p-2 text-right font-medium tabular-nums text-emerald-800">₹{r.expectedCash.toFixed(0)}</td>
+                <td className="p-2 text-right font-medium tabular-nums text-sky-800">₹{r.expectedUpi.toFixed(0)}</td>
+                <td className="p-2 text-right tabular-nums">₹{r.net.toFixed(0)}</td>
                 <td className="p-2 text-stone-500">{r.note}</td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-4 text-center text-stone-500">
-                  No money activity in the last 14 days.
+                <td colSpan={9} className="p-4 text-center text-stone-500">
+                  No money activity in this range.
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
