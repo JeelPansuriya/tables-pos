@@ -117,6 +117,7 @@ export async function syncPending(): Promise<SyncResult> {
     const syncedBills = await pushBills(db, cfg);
     const syncedPreorders = await pushPreorders(db, cfg);
     await pushDayExpenses(db, cfg);
+    await pushCashCounts(db, cfg);
     setSetting('last_sync_at', new Date().toISOString());
     setSetting('last_sync_error', '');
     return { ok: true, syncedBills, syncedPreorders };
@@ -235,6 +236,25 @@ async function pushDayExpenses(db: Database, cfg: CloudConfig): Promise<number> 
   const err = await upsert(cfg, 'day_expenses', rows, 'merge-duplicates');
   if (err) throw new Error(`day_expenses: ${err}`);
   const mark = db.prepare(`UPDATE day_expenses SET sync_status='synced' WHERE date=?`);
+  const tx = db.transaction(() => rows.forEach((r) => mark.run(r.date)));
+  tx();
+  return rows.length;
+}
+
+// End-of-day cash counts. Editable per day, so merge-duplicates (a later edit
+// overwrites the cloud copy). This was missing from the sync loop, so any
+// pending cash_counts (e.g. after "Re-upload all history") never drained.
+async function pushCashCounts(db: Database, cfg: CloudConfig): Promise<number> {
+  const rows = db
+    .prepare(
+      `SELECT date, counted_cash, note, counted_at FROM cash_counts
+       WHERE sync_status = 'pending' ORDER BY date ASC`
+    )
+    .all() as Array<{ date: string }>;
+  if (rows.length === 0) return 0;
+  const err = await upsert(cfg, 'cash_counts', rows, 'merge-duplicates');
+  if (err) throw new Error(`cash_counts: ${err}`);
+  const mark = db.prepare(`UPDATE cash_counts SET sync_status='synced' WHERE date=?`);
   const tx = db.transaction(() => rows.forEach((r) => mark.run(r.date)));
   tx();
   return rows.length;
