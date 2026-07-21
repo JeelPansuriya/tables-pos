@@ -216,6 +216,11 @@ function initSchema(db: Database.Database) {
   if (!tableHasColumn(db, 'day_expenses', 'upi_extra')) {
     db.exec(`ALTER TABLE day_expenses ADD COLUMN upi_extra REAL NOT NULL DEFAULT 0`);
   }
+  // Migrate: cash physically deposited / taken out of the drawer (not a business
+  // expense, but it still reduces the expected cash on hand).
+  if (!tableHasColumn(db, 'day_expenses', 'cash_deposit')) {
+    db.exec(`ALTER TABLE day_expenses ADD COLUMN cash_deposit REAL NOT NULL DEFAULT 0`);
+  }
 
   seedTables(db);
   // The walk-in "Counter" behaves like a table (multiple open bills, settle,
@@ -234,6 +239,11 @@ function initSchema(db: Database.Database) {
   // always get exact, distinct, small ids.
   const purged = purgeImportedRows(db);
   if (purged > 0) console.log(`Removed ${purged} imported/archived row(s) from the operating DB.`);
+  // Re-number any child rows (payments/items) that got JS-unsafe ids, then pull
+  // every operational sequence back into the safe range — so new bills AND their
+  // payments/items get exact, distinct, syncable ids.
+  const renum = reassignHugeChildIds(db);
+  if (renum > 0) console.log(`Re-numbered ${renum} child row(s) with unsafe ids.`);
   clampAutoIncrementToSafe(db);
 }
 
@@ -250,8 +260,21 @@ const MAX_SAFE_ID = 9007199254740991;
  * largest *safe* existing id means new rows get exact ids (safe_max+1, +2, …)
  * that never collide with the huge historical rows. Safe to run every launch.
  */
+// Every operational table with its own AUTOINCREMENT id. The v1/cloud import
+// bumped ALL of these — not just bills — so each needs the same treatment or its
+// new rows get JS-unsafe ids (which is why bill_payments/bill_items silently
+// failed to sync while bills were fine).
+const AUTOINC_TABLES = [
+  'bills',
+  'preorders',
+  'bill_items',
+  'bill_payments',
+  'preorder_items',
+  'preorder_payments',
+] as const;
+
 export function clampAutoIncrementToSafe(db: Database.Database) {
-  for (const table of ['bills', 'preorders'] as const) {
+  for (const table of AUTOINC_TABLES) {
     const seqRow = db
       .prepare(`SELECT seq FROM sqlite_sequence WHERE name=?`)
       .get(table) as { seq: number } | undefined;
@@ -264,6 +287,49 @@ export function clampAutoIncrementToSafe(db: Database.Database) {
     ).m;
     db.prepare(`UPDATE sqlite_sequence SET seq=? WHERE name=?`).run(maxSafe, table);
   }
+}
+
+// Child tables (items/payments) whose id got bumped huge, plus the parent to
+// re-flag for sync once a row is re-numbered.
+const CHILD_TABLES = [
+  { table: 'bill_items', parent: 'bills', fk: 'bill_id' },
+  { table: 'bill_payments', parent: 'bills', fk: 'bill_id' },
+  { table: 'preorder_items', parent: 'preorders', fk: 'preorder_id' },
+  { table: 'preorder_payments', parent: 'preorders', fk: 'preorder_id' },
+] as const;
+
+/**
+ * Re-number any child rows (bill items/payments, pre-order items/payments) that
+ * ended up with JS-unsafe ids — assign them fresh ids just above the safe max,
+ * and re-flag their parent bill/pre-order as pending so the corrected rows push
+ * to the cloud. Without this, a day's payments collapse to the same JS number
+ * and the cloud silently drops all but one. Returns rows renumbered.
+ */
+export function reassignHugeChildIds(db: Database.Database): number {
+  let total = 0;
+  for (const { table, parent, fk } of CHILD_TABLES) {
+    const huge = db
+      .prepare(`SELECT id, ${fk} AS pid FROM ${table} WHERE id > ? ORDER BY id ASC`)
+      .all(MAX_SAFE_ID) as Array<{ id: number; pid: number }>;
+    if (huge.length === 0) continue;
+    let next = (
+      db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table} WHERE id <= ?`).get(MAX_SAFE_ID) as {
+        m: number;
+      }
+    ).m;
+    const upd = db.prepare(`UPDATE ${table} SET id=? WHERE id=?`);
+    const markParent = db.prepare(`UPDATE ${parent} SET sync_status='pending' WHERE id=?`);
+    const tx = db.transaction(() => {
+      for (const row of huge) {
+        next += 1;
+        upd.run(next, row.id);
+        markParent.run(row.pid);
+        total += 1;
+      }
+    });
+    tx();
+  }
+  return total;
 }
 
 /**

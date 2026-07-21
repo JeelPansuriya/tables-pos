@@ -16,7 +16,13 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
   const [received, setReceived] = useState<number>(0);
 
   const confirm = () => {
-    if (received >= total) onConfirm(received, +(received - total).toFixed(2));
+    if (received >= total) {
+      onConfirm(received, +(received - total).toFixed(2));
+    } else {
+      // Quick close: no (or short) amount typed — the cashier worked the change
+      // out themselves, so just record it as an exact full-cash payment.
+      onConfirm(total, 0);
+    }
   };
 
   // Esc cancels globally. Enter confirms (handled here and on the input) — we do
@@ -129,12 +135,8 @@ export default function CashChangeModal({ total, onCancel, onConfirm }: Props) {
           <button className="btn-ghost" onClick={onCancel}>
             Cancel
           </button>
-          <button
-            className="btn-primary"
-            disabled={!ok}
-            onClick={() => onConfirm(received, +change.toFixed(2))}
-          >
-            Confirm payment
+          <button className="btn-primary" onClick={confirm}>
+            {ok ? 'Confirm payment' : 'Confirm (exact cash)'}
           </button>
         </div>
       </div>

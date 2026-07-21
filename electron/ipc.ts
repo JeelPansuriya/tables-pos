@@ -1279,6 +1279,64 @@ export function registerIpc() {
     return +(bill + pre).toFixed(2);
   }
 
+  // Same, but cumulative up to and including day `d` — used for the running
+  // expected balance (carry-forward) of a mode.
+  function collectedByModeUpto(d: string, mode: PaymentMode): number {
+    const bill = (db
+      .prepare(
+        `SELECT COALESCE(SUM(bp.amount),0) AS a FROM bill_payments bp
+         JOIN bills b ON b.id=bp.bill_id
+         WHERE b.status='closed' AND bp.mode=? AND date(b.closed_at,'localtime') <= ?`
+      )
+      .get(mode, d) as { a: number }).a;
+    const pre = (db
+      .prepare(
+        `SELECT COALESCE(SUM(amount),0) AS a FROM preorder_payments
+         WHERE mode=? AND date(received_at,'localtime') <= ?`
+      )
+      .get(mode, d) as { a: number }).a;
+    return +(bill + pre).toFixed(2);
+  }
+
+  // Cumulative day_expenses column up to and including day `d`.
+  function dayExpenseSumUpto(
+    d: string,
+    col: 'cash_expense' | 'upi_expense' | 'cash_extra' | 'upi_extra' | 'cash_deposit'
+  ): number {
+    return +(
+      db.prepare(`SELECT COALESCE(SUM(${col}),0) AS a FROM day_expenses WHERE date <= ?`).get(d) as {
+        a: number;
+      }
+    ).a.toFixed(2);
+  }
+
+  // Opening cash float — the drawer balance carried over when cash counting
+  // began (set from the first counted-cash row on import). It only applies from
+  // that opening date onward; earlier dates (the v1 era) have no drawer balance
+  // in this app. UPI has no opening float.
+  function openingFloat(mode: 'cash' | 'upi', d: string): number {
+    if (mode !== 'cash') return 0;
+    const get = (k: string) =>
+      (db.prepare(`SELECT value FROM settings WHERE key=?`).get(k) as { value?: string } | undefined)
+        ?.value;
+    const openDate = get('cash_opening_date');
+    if (openDate && d < openDate) return 0;
+    return parseFloat(get('cash_opening_float') || '0') || 0;
+  }
+
+  // Running expected balance of a mode as of end-of-day `d`: opening float +
+  // everything taken in (bill/pre-order collections + manual extras) minus
+  // everything spent, from the start through `d`. Equivalent to "previous day's
+  // expected + today's collected − today's expense".
+  function expectedBalance(d: string, mode: 'cash' | 'upi'): number {
+    const collected = collectedByModeUpto(d, mode);
+    const extra = dayExpenseSumUpto(d, mode === 'cash' ? 'cash_extra' : 'upi_extra');
+    const expense = dayExpenseSumUpto(d, mode === 'cash' ? 'cash_expense' : 'upi_expense');
+    // Cash deposited / taken out of the drawer also lowers the cash on hand.
+    const deposit = mode === 'cash' ? dayExpenseSumUpto(d, 'cash_deposit') : 0;
+    return +(openingFloat(mode, d) + collected + extra - expense - deposit).toFixed(2);
+  }
+
   // Per-day money view: what was collected (from sales) vs the expenses the
   // manager entered, plus the derived cash-in-hand and net.
   ipcMain.handle('money:get', (_e, date?: string) => {
@@ -1289,16 +1347,24 @@ export function registerIpc() {
     const cardCollected = collectedByMode(d, 'card');
     const otherCollected = collectedByMode(d, 'other');
     const row = db
-      .prepare(`SELECT cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at FROM day_expenses WHERE date=?`)
+      .prepare(`SELECT cash_expense, upi_expense, cash_extra, upi_extra, cash_deposit, note, updated_at FROM day_expenses WHERE date=?`)
       .get(d) as
-      | { cash_expense: number; upi_expense: number; cash_extra: number; upi_extra: number; note: string | null; updated_at: string }
+      | { cash_expense: number; upi_expense: number; cash_extra: number; upi_extra: number; cash_deposit: number; note: string | null; updated_at: string }
       | undefined;
     const cashExpense = row?.cash_expense ?? 0;
     const upiExpense = row?.upi_expense ?? 0;
     const cashExtra = row?.cash_extra ?? 0; // extra cash in, outside a bill
     const upiExtra = row?.upi_extra ?? 0;
+    const cashDeposit = row?.cash_deposit ?? 0; // cash moved to bank / taken out
     // Total money in = sales collected (all modes) + the manual extras.
     const totalCollected = +(cashCollected + upiCollected + cardCollected + otherCollected + cashExtra + upiExtra).toFixed(2);
+    // Running expected balances (carry-forward): what should be on hand as of
+    // this day, and what was carried in from the previous day.
+    const prevD = prevDayStr(d);
+    const expectedCash = expectedBalance(d, 'cash');
+    const expectedUpi = expectedBalance(d, 'upi');
+    const prevExpectedCash = expectedBalance(prevD, 'cash');
+    const prevExpectedUpi = expectedBalance(prevD, 'upi');
     return {
       ok: true,
       date: d,
@@ -1312,32 +1378,89 @@ export function registerIpc() {
       totalCollected,
       cashExpense,
       upiExpense,
+      cashDeposit,
       note: row?.note ?? '',
       updatedAt: row?.updated_at ?? null,
-      // Cash physically in hand: sales cash + extra cash − cash spending.
-      cashInHand: +(cashCollected + cashExtra - cashExpense).toFixed(2),
+      // Cash physically in hand today: sales cash + extra cash − cash spending − deposits.
+      cashInHand: +(cashCollected + cashExtra - cashExpense - cashDeposit).toFixed(2),
       // Overall net after all expenses (extras already fold into totalCollected).
       net: +(totalCollected - cashExpense - upiExpense).toFixed(2),
+      // Running carry-forward balances per mode (prev day + today's flow).
+      expectedCash,
+      expectedUpi,
+      prevExpectedCash,
+      prevExpectedUpi,
     };
   });
 
-  ipcMain.handle('money:set', (_e, { date, cash_expense, upi_expense, cash_extra, upi_extra, note }) => {
+  ipcMain.handle('money:set', (_e, { date, cash_expense, upi_expense, cash_extra, upi_extra, cash_deposit, note }) => {
     const session = requireSession();
     const d = date || new Date().toISOString().slice(0, 10);
     const cash = Math.max(0, parseFloat(cash_expense) || 0);
     const upi = Math.max(0, parseFloat(upi_expense) || 0);
     const cashIn = Math.max(0, parseFloat(cash_extra) || 0);
     const upiIn = Math.max(0, parseFloat(upi_extra) || 0);
+    const cashOut = Math.max(0, parseFloat(cash_deposit) || 0);
     db.prepare(
-      `INSERT INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_by_user_id, updated_at, sync_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 'pending')
+      `INSERT INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, cash_deposit, note, updated_by_user_id, updated_at, sync_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 'pending')
        ON CONFLICT(date) DO UPDATE SET cash_expense=excluded.cash_expense, upi_expense=excluded.upi_expense,
-         cash_extra=excluded.cash_extra, upi_extra=excluded.upi_extra,
+         cash_extra=excluded.cash_extra, upi_extra=excluded.upi_extra, cash_deposit=excluded.cash_deposit,
          note=excluded.note, updated_by_user_id=excluded.updated_by_user_id, updated_at=excluded.updated_at,
          sync_status='pending'`
-    ).run(d, cash, upi, cashIn, upiIn, note || null, session.userId);
-    logAudit(db, 'money.set', { details: { date: d, cash_expense: cash, upi_expense: upi, cash_extra: cashIn, upi_extra: upiIn } });
+    ).run(d, cash, upi, cashIn, upiIn, cashOut, note || null, session.userId);
+    logAudit(db, 'money.set', { details: { date: d, cash_expense: cash, upi_expense: upi, cash_extra: cashIn, upi_extra: upiIn, cash_deposit: cashOut } });
     return { ok: true };
+  });
+
+  // One-time import: turn the historical end-of-day cash counts (cash_counts,
+  // the actual drawer amounts) into the Money model. The first count is the
+  // opening float; for each later day the cash flow that isn't explained by
+  // sales is booked as a cash expense (money out) or, if the drawer grew beyond
+  // sales, as extra cash in. After this, the running Expected-cash reproduces
+  // the real counted values and the daily cash expense is filled in.
+  ipcMain.handle('money:integrateCashCounts', () => {
+    requireAdmin();
+    const counts = db
+      .prepare(`SELECT date, counted_cash FROM cash_counts ORDER BY date ASC`)
+      .all() as Array<{ date: string; counted_cash: number }>;
+    if (counts.length === 0) return { ok: true, updated: 0, opening: 0 };
+
+    const opening = counts[0].counted_cash;
+    const upsert = db.prepare(
+      `INSERT INTO day_expenses (date, cash_expense, cash_extra, updated_at, sync_status)
+       VALUES (@date, @cash_expense, @cash_extra, datetime('now'), 'pending')
+       ON CONFLICT(date) DO UPDATE SET cash_expense=excluded.cash_expense,
+         cash_extra=excluded.cash_extra, updated_at=excluded.updated_at, sync_status='pending'`
+    );
+    let updated = 0;
+    const tx = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO settings (key, value) VALUES ('cash_opening_float', ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+      ).run(String(opening));
+      db.prepare(
+        `INSERT INTO settings (key, value) VALUES ('cash_opening_date', ?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+      ).run(counts[0].date);
+      let prev = opening;
+      for (let i = 1; i < counts.length; i++) {
+        const { date, counted_cash } = counts[i];
+        const cashSales = collectedByMode(date, 'cash');
+        // Cash that left the drawer beyond sales = expense; if the drawer grew
+        // beyond sales, that surplus is extra cash in.
+        const netOut = +(prev + cashSales - counted_cash).toFixed(2);
+        const cash_expense = netOut > 0 ? netOut : 0;
+        const cash_extra = netOut < 0 ? -netOut : 0;
+        upsert.run({ date, cash_expense, cash_extra });
+        prev = counted_cash;
+        updated++;
+      }
+    });
+    tx();
+    logAudit(db, 'money.integrateCashCounts', { details: { days: counts.length, opening } });
+    scheduleSoon();
+    return { ok: true, updated, opening, from: counts[0].date, to: counts[counts.length - 1].date };
   });
 
   // History table: collected vs expenses per day over a range (newest first).

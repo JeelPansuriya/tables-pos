@@ -21,9 +21,14 @@ type MoneyDay = {
   totalCollected: number;
   cashExpense: number;
   upiExpense: number;
+  cashDeposit: number;
   note: string;
   cashInHand: number;
   net: number;
+  expectedCash: number;
+  expectedUpi: number;
+  prevExpectedCash: number;
+  prevExpectedUpi: number;
 };
 
 type RangeRow = {
@@ -46,7 +51,8 @@ export default function MoneyPage() {
   const [upi, setUpi] = useState(0);
   const [cashIn, setCashIn] = useState(0); // extra cash taken in outside a bill
   const [upiIn, setUpiIn] = useState(0);
-  const [counted, setCounted] = useState(0); // actual cash counted in the drawer (end of day)
+  const [showExtra, setShowExtra] = useState(false); // "extra in" is rare — hidden by default
+  const [takeOut, setTakeOut] = useState(0); // cash taken out of the drawer (deposit / profit)
   const [note, setNote] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
   const [rows, setRows] = useState<RangeRow[]>([]);
@@ -59,12 +65,11 @@ export default function MoneyPage() {
       setUpi(r.upiExpense || 0);
       setCashIn(r.cashExtra || 0);
       setUpiIn(r.upiExtra || 0);
+      setTakeOut(r.cashDeposit || 0);
       setNote(r.note || '');
+      // Reveal the rarely-used "extra in" section only when this day has one.
+      setShowExtra((r.cashExtra || 0) > 0 || (r.upiExtra || 0) > 0);
     }
-    // Pull the end-of-day cash count that was entered previously (kept in the
-    // cash-count store) so it shows here and stays editable in one place.
-    const c = await api.cash.get(date);
-    if (c?.ok) setCounted(c.counted ?? 0);
   }
   async function loadRange() {
     const r = await api.money.range({});
@@ -85,11 +90,9 @@ export default function MoneyPage() {
       upi_expense: upi,
       cash_extra: cashIn,
       upi_extra: upiIn,
+      cash_deposit: takeOut,
       note,
     });
-    // Persist the drawer count alongside, in the same cash store the old
-    // reconciliation used — so the two stay in sync.
-    await api.cash.set({ date, counted_cash: counted });
     setMsg(r?.ok ? 'Saved.' : r?.error || 'Failed');
     setTimeout(() => setMsg(null), 2500);
     await load();
@@ -107,10 +110,12 @@ export default function MoneyPage() {
   // Live derived values from the current inputs (before saving). Sales come from
   // bills; extras (cashIn/upiIn) are the manual "extra received" amounts.
   const salesCollected = info.cashCollected + info.upiCollected + info.cardCollected + info.otherCollected;
-  const cashInHand = +(info.cashCollected + cashIn - cash).toFixed(2);
   const net = +(salesCollected + cashIn + upiIn - cash - upi).toFixed(2);
-  // Reconciliation: counted drawer cash vs the expected cash-in-hand.
-  const countedDiff = +(counted - cashInHand).toFixed(2);
+  // Running expected balances = what carried in from the previous day + today's
+  // flow (collected + any extra − expense − cash taken out). Uses the live
+  // inputs so it updates as you type, before saving.
+  const expectedCash = +(info.prevExpectedCash + info.cashCollected + cashIn - cash - takeOut).toFixed(2);
+  const expectedUpi = +(info.prevExpectedUpi + info.upiCollected + upiIn - upi).toFixed(2);
 
   return (
     <div className="space-y-3">
@@ -178,37 +183,57 @@ export default function MoneyPage() {
         </div>
 
         <div>
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-emerald-700">
-            Extra received (in)
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-700">
+            Cash taken out
             <span className="ml-2 font-normal normal-case tracking-normal text-stone-500">
-              money in that wasn't a normal bill — tips, an old due, a quick sale
+              deposited to bank or profit taken out — lowers cash on hand, not a business expense
             </span>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
-              <label className="text-xs text-stone-600">Extra cash in</label>
-              <NumberField className="input" min={0} value={cashIn} onChange={setCashIn} placeholder="₹0" />
-            </div>
-            <div>
-              <label className="text-xs text-stone-600">Extra UPI in</label>
-              <NumberField className="input" min={0} value={upiIn} onChange={setUpiIn} placeholder="₹0" />
+              <label className="text-xs text-stone-600">Cash taken out (deposit / profit)</label>
+              <NumberField className="input" min={0} value={takeOut} onChange={setTakeOut} placeholder="₹0" />
             </div>
           </div>
         </div>
 
         <div>
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-stone-600">
-            Cash counted (drawer)
-            <span className="ml-2 font-normal normal-case tracking-normal text-stone-500">
-              the actual cash in the drawer at end of day — compared against expected below
-            </span>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="text-xs text-stone-600">Cash counted</label>
-              <NumberField className="input" min={0} value={counted} onChange={setCounted} placeholder="₹0" />
-            </div>
-          </div>
+          {!showExtra ? (
+            <button
+              type="button"
+              className="text-xs font-medium text-stone-500 hover:text-stone-700"
+              onClick={() => setShowExtra(true)}
+            >
+              + Add extra received (rare — tips, an old due, a quick off-bill sale)
+            </button>
+          ) : (
+            <>
+              <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-700">
+                Extra received (in)
+                <button
+                  type="button"
+                  className="font-normal normal-case tracking-normal text-stone-400 hover:text-stone-600"
+                  onClick={() => {
+                    setShowExtra(false);
+                    setCashIn(0);
+                    setUpiIn(0);
+                  }}
+                >
+                  (hide)
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs text-stone-600">Extra cash in</label>
+                  <NumberField className="input" min={0} value={cashIn} onChange={setCashIn} placeholder="₹0" />
+                </div>
+                <div>
+                  <label className="text-xs text-stone-600">Extra UPI in</label>
+                  <NumberField className="input" min={0} value={upiIn} onChange={setUpiIn} placeholder="₹0" />
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div>
@@ -234,28 +259,27 @@ export default function MoneyPage() {
         </div>
       </div>
 
-      {/* Derived */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      {/* Expected balances — the running carry-forward the manager checks daily */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <KPI
-          label="Cash in hand (expected)"
-          value={`₹${cashInHand.toFixed(2)}`}
-          hint="cash collected + extra − cash expense"
-          tone={cashInHand < 0 ? 'rose' : 'emerald'}
-        />
-        <KPI label="Cash counted" value={`₹${counted.toFixed(2)}`} hint="what you counted in the drawer" />
-        <KPI
-          label="Over / short"
-          value={`${countedDiff >= 0 ? '+' : '−'}₹${Math.abs(countedDiff).toFixed(2)}`}
-          hint="counted − expected"
-          tone={countedDiff < 0 ? 'rose' : countedDiff > 0 ? 'emerald' : undefined}
+          label="Expected cash"
+          value={`₹${expectedCash.toFixed(2)}`}
+          hint={`prev ₹${info.prevExpectedCash.toFixed(0)} + cash ₹${(info.cashCollected + cashIn).toFixed(0)} − exp ₹${cash.toFixed(0)}${takeOut ? ` − out ₹${takeOut.toFixed(0)}` : ''}`}
+          tone={expectedCash < 0 ? 'rose' : 'emerald'}
         />
         <KPI
-          label="Net (all modes)"
+          label="Expected UPI"
+          value={`₹${expectedUpi.toFixed(2)}`}
+          hint={`prev ₹${info.prevExpectedUpi.toFixed(0)} + upi ₹${(info.upiCollected + upiIn).toFixed(0)} − exp ₹${upi.toFixed(0)}`}
+          tone={expectedUpi < 0 ? 'rose' : 'sky'}
+        />
+        <KPI
+          label="Net today (all modes)"
           value={`₹${net.toFixed(2)}`}
-          hint="total collected − all expenses"
+          hint="today's collected − today's expenses"
           tone={net < 0 ? 'rose' : undefined}
         />
-        <KPI label="Total expense" value={`₹${(cash + upi).toFixed(2)}`} tone="rose" />
+        <KPI label="Total expense today" value={`₹${(cash + upi).toFixed(2)}`} tone="rose" />
       </div>
 
       {/* History */}

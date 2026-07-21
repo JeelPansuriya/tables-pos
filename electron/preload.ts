@@ -192,9 +192,11 @@ const api = {
       upi_expense: number;
       cash_extra?: number;
       upi_extra?: number;
+      cash_deposit?: number;
       note?: string;
     }) => invoke('money:set', payload),
     range: (params: { from?: string; to?: string }) => invoke('money:range', params),
+    integrateCashCounts: () => invoke('money:integrateCashCounts'),
   },
   audit: {
     list: (params: { from?: string; to?: string; q?: string }) =>

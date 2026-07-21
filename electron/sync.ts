@@ -227,7 +227,7 @@ async function pushPreorders(db: Database, cfg: CloudConfig): Promise<number> {
 async function pushDayExpenses(db: Database, cfg: CloudConfig): Promise<number> {
   const rows = db
     .prepare(
-      `SELECT date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at FROM day_expenses
+      `SELECT date, cash_expense, upi_expense, cash_extra, upi_extra, cash_deposit, note, updated_at FROM day_expenses
        WHERE sync_status = 'pending' ORDER BY date ASC`
     )
     .all() as Array<{ date: string }>;
@@ -542,13 +542,13 @@ export async function pullAndMerge(): Promise<PullResult> {
         addedCash += insCash.run({ date: c.date, counted_cash: c.counted_cash ?? 0, note: c.note ?? null, counted_at: c.counted_at ?? null }).changes;
 
       const insExp = db.prepare(
-        `INSERT OR IGNORE INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, note, updated_at, sync_status)
-         VALUES (@date,@cash_expense,@upi_expense,@cash_extra,@upi_extra,@note,@updated_at,'synced')`
+        `INSERT OR IGNORE INTO day_expenses (date, cash_expense, upi_expense, cash_extra, upi_extra, cash_deposit, note, updated_at, sync_status)
+         VALUES (@date,@cash_expense,@upi_expense,@cash_extra,@upi_extra,@cash_deposit,@note,@updated_at,'synced')`
       );
       for (const e of dayExpenses)
         addedExp += insExp.run({
           date: e.date, cash_expense: e.cash_expense ?? 0, upi_expense: e.upi_expense ?? 0,
-          cash_extra: e.cash_extra ?? 0, upi_extra: e.upi_extra ?? 0,
+          cash_extra: e.cash_extra ?? 0, upi_extra: e.upi_extra ?? 0, cash_deposit: e.cash_deposit ?? 0,
           note: e.note ?? null, updated_at: e.updated_at ?? null,
         }).changes;
     });

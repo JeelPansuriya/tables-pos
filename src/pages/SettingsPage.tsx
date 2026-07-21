@@ -70,6 +70,22 @@ export default function SettingsPage() {
     setMsg(r?.ok ? `Recomputed plate counts for ${r.updated} bills.` : r?.error || 'Failed');
   }
 
+  const [importingCash, setImportingCash] = useState(false);
+  async function importCashCounts() {
+    setImportingCash(true);
+    const r = await api.money.integrateCashCounts();
+    setImportingCash(false);
+    if (r?.ok) {
+      setMsg(
+        r.updated > 0
+          ? `Imported ${r.updated} day(s) of cash counts (${r.from} → ${r.to}); opening float ₹${r.opening}.`
+          : 'No cash counts found to import.'
+      );
+    } else {
+      setMsg(r?.error || 'Import failed');
+    }
+  }
+
   const [resyncing, setResyncing] = useState(false);
   async function doResyncAll() {
     setResyncing(true);
@@ -358,6 +374,22 @@ export default function SettingsPage() {
           <button className="btn-ghost w-fit border border-stone-300" onClick={recomputePlates}>
             Recompute plate counts
           </button>
+
+          <div className="border-t border-stone-100 pt-3">
+            <p className="text-xs text-stone-500">
+              Import the old <strong>end-of-day cash counts</strong> (the actual drawer amounts) into
+              the Money tracker: the first count becomes the opening float, and each later day's cash
+              expense is worked out from the counts and that day's cash sales. Run once — the Money
+              tab's Expected cash will then match your real counted history.
+            </p>
+            <button
+              className="btn-ghost mt-2 w-fit border border-stone-300"
+              onClick={importCashCounts}
+              disabled={importingCash}
+            >
+              {importingCash ? 'Importing…' : 'Import counted-cash history'}
+            </button>
+          </div>
         </div>
       )}
 
