@@ -306,23 +306,28 @@ const CHILD_TABLES = [
  * and the cloud silently drops all but one. Returns rows renumbered.
  */
 export function reassignHugeChildIds(db: Database.Database): number {
+  // CRITICAL: read ids as BigInt (safeIntegers). Huge 60-bit ids collapse to the
+  // same double if read as JS numbers, so an `UPDATE … WHERE id = <number>` would
+  // match the wrong row or none — corrupting rather than fixing them.
+  const maxSafeBig = BigInt(MAX_SAFE_ID);
   let total = 0;
   for (const { table, parent, fk } of CHILD_TABLES) {
     const huge = db
       .prepare(`SELECT id, ${fk} AS pid FROM ${table} WHERE id > ? ORDER BY id ASC`)
-      .all(MAX_SAFE_ID) as Array<{ id: number; pid: number }>;
+      .safeIntegers(true)
+      .all(maxSafeBig) as Array<{ id: bigint; pid: bigint }>;
     if (huge.length === 0) continue;
-    let next = (
-      db.prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table} WHERE id <= ?`).get(MAX_SAFE_ID) as {
-        m: number;
-      }
-    ).m;
+    const maxRow = db
+      .prepare(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table} WHERE id <= ?`)
+      .safeIntegers(true)
+      .get(maxSafeBig) as { m: bigint };
+    let next = maxRow.m;
     const upd = db.prepare(`UPDATE ${table} SET id=? WHERE id=?`);
     const markParent = db.prepare(`UPDATE ${parent} SET sync_status='pending' WHERE id=?`);
     const tx = db.transaction(() => {
       for (const row of huge) {
-        next += 1;
-        upd.run(next, row.id);
+        next += 1n;
+        upd.run(next, row.id); // both exact BigInt — matches the one real row
         markParent.run(row.pid);
         total += 1;
       }
